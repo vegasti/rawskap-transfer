@@ -160,7 +160,9 @@
     try { await kobleMed($('portal').value, $('nokkel').value); } catch (e) { $('kobling-feil').textContent = String(e); }
     finally { $('koble').disabled = false; }
   };
-  $('koble-fra').onclick = async () => { await store.delete('kobling'); location.reload(); };
+  // Koble fra = stopp ALLE jobber først (Rust-laget lever videre gjennom en reload).
+  $('koble-fra').onclick = async () => { await invoke('avbryt'); await new Promise(r => setTimeout(r, 400)); await store.delete('kobling'); location.reload(); };
+  await invoke('avbryt'); // oppstart/reload: ingen gjenglemt jobb skal fortsette uten UI
   if (lagret?.nokkel) { try { await kobleMed(lagret.portal, lagret.nokkel); } catch (e) { $('kobling-status').textContent = 'Forrige kobling virker ikke lenger — logg inn på nytt.'; } }
 
   // ── Mappetre ──
