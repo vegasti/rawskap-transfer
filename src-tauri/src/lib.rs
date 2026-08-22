@@ -23,6 +23,8 @@ pub struct Fil {
     pub bytes: u64,
     #[serde(default)]
     pub sti: String,
+    #[serde(default)]
+    pub xxh64: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -209,8 +211,14 @@ async fn last_ned_en(
     if fil.bytes > 0 && n != fil.bytes {
         return Err(format!("Ufullstendig: {} av {} bytes — prøv igjen (fortsetter der den slapp)", n, fil.bytes));
     }
+    // Verifisering (22/8): har serveren xxh64, sjekkes fila før den får endelig navn.
+    if !fil.xxh64.is_empty() {
+        let _ = app.emit("framdrift", Framdrift { id: fil.id.clone(), hentet: n, total, status: "hash".into(), feil: None });
+        let h = fil_xxh64(&part).await.unwrap_or_default();
+        if h != fil.xxh64.to_lowercase() { let _ = tokio::fs::remove_file(&part).await; return Err("Verifisering feilet (xxHash) — lastet ned på nytt".into()); }
+    }
     tokio::fs::rename(&part, &maal).await.map_err(|e| format!("{e}"))?;
-    let _ = app.emit("framdrift", Framdrift { id: fil.id.clone(), hentet: n, total, status: "ferdig".into(), feil: None });
+    let _ = app.emit("framdrift", Framdrift { id: fil.id.clone(), hentet: n, total, status: if fil.xxh64.is_empty() { "ferdig".into() } else { "verifisert".into() }, feil: None });
     Ok(())
 }
 
@@ -254,7 +262,7 @@ async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
             if let Err(e) = &res {
                 let _ = app.emit("framdrift", Framdrift { id: fil.id.clone(), hentet: 0, total: fil.bytes, status: "feil".into(), feil: Some(e.clone()) });
                 if let Some(l) = &loggen { l.skriv(&format!("❌ {:<22} | ID: {} | {}", if e == "Avbrutt" { "Avbrutt" } else { "Feilet" }, fil.id, e)).await; }
-            } else if let Some(l) = &loggen { l.skriv(&format!("✅ Ferdig & størrelse ok  | {:>12} B | ID: {} | {}", fil.bytes, fil.id, sti.display())).await; }
+            } else if let Some(l) = &loggen { if fil.xxh64.is_empty() { l.skriv(&format!("✅ Ferdig & størrelse ok  | {:>12} B | ID: {} | {}", fil.bytes, fil.id, sti.display())).await; } else { l.skriv(&format!("✅ Ferdig & verifisert   | xxHash: {} | ID: {} | {}", fil.xxh64, fil.id, sti.display())).await; } }
             (fil.id.clone(), res)
         }));
     }
@@ -354,6 +362,99 @@ async fn video_info(app: &AppHandle, sti: &str) -> VideoInfo {
     v
 }
 
+// ── MULTIPART + RESUME (22/8): filer over DEL_GRENSE går i 64 MB-deler.
+// Tilstand per fil ligger i en liten JSON i appens datamappe (nøkkel =
+// xxh64 av sti|størrelse|mtime) — uploadId, originalKey, ferdige deler m/
+// ETag. Starter man på nytt (nettbrudd, lukket app) fortsettes fra siste
+// ferdige del. Rådes til å ha lifecycle-regel i R2 for forlatte multiparts.
+const DEL_BYTES: u64 = 64 * 1024 * 1024;
+const DEL_GRENSE: u64 = 96 * 1024 * 1024;
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+struct Resume { upload_id: String, original_key: String, mappe_id: String, bytes: u64, deler: Vec<(u32, String)> }
+
+fn resume_dir() -> PathBuf {
+    let d = dirs::data_local_dir().unwrap_or(std::env::temp_dir()).join("RawskapTransfer").join("opplasting");
+    let _ = std::fs::create_dir_all(&d); d
+}
+fn resume_sti(sti: &str, bytes: u64, mtime: u64) -> PathBuf {
+    let h = xxhash_rust::xxh64::xxh64(format!("{sti}|{bytes}|{mtime}").as_bytes(), 0);
+    resume_dir().join(format!("{h:016x}.json"))
+}
+fn resume_les(p: &Path) -> Option<Resume> { std::fs::read(p).ok().and_then(|b| serde_json::from_slice(&b).ok()) }
+fn resume_skriv(p: &Path, r: &Resume) { if let Ok(b) = serde_json::to_vec(r) { let tmp = p.with_extension("tmp"); if std::fs::write(&tmp, b).is_ok() { let _ = std::fs::rename(&tmp, p); } } }
+
+/// xxh64 av hele fila (1 MB-blokker). Brukes ved opplasting (lagres på raden)
+/// og ved nedlasting (verifisering mot serverens verdi).
+async fn fil_xxh64(sti: &Path) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+    let mut f = tokio::fs::File::open(sti).await.map_err(|e| format!("{e}"))?;
+    let mut h = xxhash_rust::xxh64::Xxh64::new(0);
+    let mut buf = vec![0u8; 1 << 20];
+    loop { let n = f.read(&mut buf).await.map_err(|e| format!("{e}"))?; if n == 0 { break; } h.update(&buf[..n]); }
+    Ok(format!("{:016x}", h.digest()))
+}
+
+async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &Arc<AtomicBool>, struper: Arc<Struper>, navn: &str, mime: &str, bytes: u64, sist: u64) -> Result<(String, u64), String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let rsti = resume_sti(&fil.sti, bytes, sist);
+    let mut r = resume_les(&rsti).filter(|r| r.bytes == bytes && r.mappe_id == mappe_id).unwrap_or_default();
+    if r.upload_id.is_empty() {
+        let resp = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "multipart-start", "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) })).send().await.map_err(|e| format!("{e}"))?;
+        let st = resp.status().as_u16();
+        let d: serde_json::Value = resp.json().await.map_err(|e| format!("{e}"))?;
+        if st == 401 || st == 403 { return Err("Ikke tilgang — logg inn på nytt".into()); }
+        let (uid, key) = match (d["uploadId"].as_str(), d["originalKey"].as_str()) { (Some(u), Some(kk)) => (u.to_string(), kk.to_string()), _ => return Err(d["error"].as_str().unwrap_or("multipart-start feilet").to_string()) };
+        r = Resume { upload_id: uid, original_key: key, mappe_id: mappe_id.to_string(), bytes, deler: vec![] };
+        resume_skriv(&rsti, &r);
+    }
+    let antall = ((bytes + DEL_BYTES - 1) / DEL_BYTES) as u32;
+    let ferdige: std::collections::HashSet<u32> = r.deler.iter().map(|(n, _)| *n).collect();
+    let mut hentet = ferdige.len() as u64 * DEL_BYTES;
+    if hentet > bytes { hentet = bytes; }
+    let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet, total: bytes, status: "laster".into(), feil: None });
+    let mut f = tokio::fs::File::open(&fil.sti).await.map_err(|e| format!("{e}"))?;
+    // Presigner deler i bolker på 20 (URL-ene lever 1 t).
+    let mangler: Vec<u32> = (1..=antall).filter(|n| !ferdige.contains(n)).collect();
+    for bolk in mangler.chunks(20) {
+        let resp = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "multipart-deler", "originalKey": r.original_key, "uploadId": r.upload_id, "deler": bolk })).send().await.map_err(|e| format!("{e}"))?;
+        let d: serde_json::Value = resp.json().await.map_err(|e| format!("{e}"))?;
+        let urler: std::collections::HashMap<u32, String> = d["deler"].as_array().map(|a| a.iter().filter_map(|x| Some((x["nr"].as_u64()? as u32, x["url"].as_str()?.to_string()))).collect()).unwrap_or_default();
+        if urler.is_empty() { return Err(d["error"].as_str().unwrap_or("Kunne ikke signere deler — opplastingen kan være utløpt; prøv igjen").to_string()); }
+        for nr in bolk {
+            if avbryt.load(Ordering::Relaxed) { return Err("Avbrutt".into()); }
+            let url = urler.get(nr).ok_or("mangler URL for del")?;
+            let start = (*nr as u64 - 1) * DEL_BYTES;
+            let len = (bytes - start).min(DEL_BYTES);
+            f.seek(std::io::SeekFrom::Start(start)).await.map_err(|e| format!("{e}"))?;
+            let mut buf = vec![0u8; len as usize];
+            f.read_exact(&mut buf).await.map_err(|e| format!("{e}"))?;
+            struper.tell(len).await;
+            // Én del = ett forsøk × 3 (ekte resume: ferdige deler røres aldri).
+            let mut etag = None;
+            for _ in 0..3 {
+                match bare.put(url).header(reqwest::header::CONTENT_LENGTH, len).body(buf.clone()).send().await {
+                    Ok(resp) if resp.status().is_success() => { etag = resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(|s| s.trim_matches('"').to_string()); break; }
+                    Ok(resp) => { if resp.status().as_u16() == 403 { break; } }
+                    Err(_) => {}
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            }
+            let etag = etag.ok_or_else(|| format!("Del {nr} feilet — prøv igjen (fortsetter fra del {nr})"))?;
+            r.deler.push((*nr, etag)); resume_skriv(&rsti, &r);
+            hentet = (hentet + len).min(bytes);
+            let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet, total: bytes, status: "laster".into(), feil: None });
+        }
+    }
+    // Sett sammen
+    let deler: Vec<serde_json::Value> = r.deler.iter().map(|(n, e)| serde_json::json!({ "nr": n, "etag": e })).collect();
+    let resp = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "multipart-fullfor", "originalKey": r.original_key, "uploadId": r.upload_id, "deler": deler })).send().await.map_err(|e| format!("{e}"))?;
+    let d: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
+    if !d["ok"].as_bool().unwrap_or(false) { return Err(d["error"].as_str().unwrap_or("Kunne ikke sette sammen fila").to_string()); }
+    let _ = std::fs::remove_file(&rsti);
+    Ok((r.original_key.clone(), hentet))
+}
+
 // ── OPPLASTING (22/8): samme løype som nettleseren — presign → PUT rett til
 // R2 → fullfør (serveren lager thumb/EXIF for bilder). Undermapper gjenskapes
 // i skapet (mapper-API, cache per sti). Video får ingen poster i v0.
@@ -409,6 +510,14 @@ async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Clien
     let meta = tokio::fs::metadata(&fil.sti).await.map_err(|e| format!("{e}"))?;
     let bytes = meta.len();
     let sist = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
+    // xxh64 mens vi likevel leser — lagres på raden, verifiseres ved nedlasting.
+    let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: 0, total: bytes, status: "hash".into(), feil: None });
+    let xxh = fil_xxh64(std::path::Path::new(&fil.sti)).await.ok();
+    // Store filer: multipart m/ resume. Små: én PUT som før.
+    if bytes > DEL_GRENSE {
+        let (key, _) = last_opp_multipart(app, k, bare, portal, fil, mappe_id, avbryt, struper.clone(), &navn, mime, bytes, sist).await?;
+        return fullfor_opplasting(app, k, portal, fil, &key, &navn, mime, bytes, sist, mappe_id, xxh).await;
+    }
     // 1) presign
     let r = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "presign", "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) })).send().await.map_err(|e| format!("{e}"))?;
     let st = r.status().as_u16();
@@ -436,9 +545,14 @@ async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Clien
         let _ = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "avbryt", "originalKeys": [key] })).send().await;
         return Err("Avbrutt".into());
     }
-    // 3) fullfør (server: thumb/EXIF/dedup for bilder; video: poster/sprite fra ffmpeg her)
+    fullfor_opplasting(app, k, portal, fil, &key, &navn, mime, bytes, sist, mappe_id, xxh).await
+}
+
+/// Fullfør-steget (server: thumb/EXIF/dedup for bilder; video: poster/sprite fra ffmpeg her).
+async fn fullfor_opplasting(app: &AppHandle, k: &reqwest::Client, portal: &str, fil: &OppFil, key: &str, navn: &str, mime: &str, bytes: u64, sist: u64, mappe_id: &str, xxh: Option<String>) -> Result<(), String> {
     let mut body = serde_json::json!({ "action": "fullfor", "originalKey": key, "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) });
-    if er_video(&navn) {
+    if let Some(x) = xxh { body["xxh64"] = serde_json::json!(x); }
+    if er_video(navn) {
         let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: bytes, total: bytes, status: "thumbs".into(), feil: None });
         let vi = video_info(app, &fil.sti).await;
         if vi.bredde > 0 { body["bredde"] = serde_json::json!(vi.bredde); body["hoyde"] = serde_json::json!(vi.hoyde); }
