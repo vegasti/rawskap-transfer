@@ -43,7 +43,9 @@
   .filer { flex:1; overflow:auto; padding:6px 10px; }
   .filrad { display:grid; grid-template-columns:1fr 100px 90px; gap:12px; align-items:center; padding:7px 8px; border-radius:6px; font-size:13px; }
   .filrad:hover { background:var(--flate); }
-  .filrad.hode { color:var(--svak); font-size:11px; letter-spacing:.1em; text-transform:uppercase; font-weight:700; position:sticky; top:0; background:var(--bg); }
+  .filrad.hode { color:var(--svak); font-size:11px; letter-spacing:.1em; text-transform:uppercase; font-weight:700; position:sticky; top:0; background:var(--bg); border-bottom:1px solid var(--kant); margin-bottom:4px; padding-bottom:9px; border-radius:0; z-index:1; }
+  .filrad.hode span[data-sort] { cursor:pointer; user-select:none; } .filrad.hode span[data-sort]:hover { color:var(--fg); }
+  .filrad.hode .pil { margin-left:5px; font-size:10px; }
   .filrad .navn { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .filrad .navn small { color:var(--svakere); margin-left:6px; font-size:11px; }
   .filrad .tall { text-align:right; font-variant-numeric:tabular-nums; color:var(--svak); }
@@ -235,6 +237,8 @@
   const fmt = b => b >= 1e9 ? `${(b/1e9).toFixed(2)} GB` : b >= 1e6 ? `${(b/1e6).toFixed(1)} MB` : `${Math.round(b/1e3)} kB`;
   const store = await load('transfer.json', { autoSave: true });
   let portal = '', nokkel = '', data = null, valgtMappe = '', maal = '', visning = 'mappe';
+  let sortFelt = 'navn', sortStig = true; // fil-lista: klikk på kolonnehodet
+  const samle = new Intl.Collator('nb', { numeric: true, sensitivity: 'base' });
   // ── Innstillinger (persistert i transfer.json) ──
   const P = Object.assign({ fastMaal: true, konflikt: 'hopp', logg: false, ned: 0, opp: 0, vFeil: true, vFerdig: true }, (await load('transfer.json', { autoSave: true }).then(s => s.get('pref'))) || {});
   const lagreP = async () => { await store.set('pref', P); await invoke('sett_nettverk', { nedMbps: Number(P.ned) || 0, oppMbps: Number(P.opp) || 0 }); };
@@ -384,7 +388,10 @@
     const el = $('filer'); el.innerHTML = '';
     const barn = data.mapper.filter(m => (m.forelderId || '') === id).sort((a, b) => a.navn.localeCompare(b.navn, 'nb'));
     if (!filer.length && !barn.length) { el.innerHTML = `<div class="tom">${t.tomMappe}</div>`; return; }
-    el.innerHTML = `<div class="filrad hode"><span>${t.navn}</span><span class="tall">${t.storrelse}</span><span></span></div>`;
+    const pil = f => sortFelt === f ? `<span class="pil">${sortStig ? '▲' : '▼'}</span>` : '';
+    el.innerHTML = `<div class="filrad hode"><span data-sort="navn">${t.navn}${pil('navn')}</span><span class="tall" data-sort="bytes">${t.storrelse}${pil('bytes')}</span><span></span></div>`;
+    el.querySelectorAll('[data-sort]').forEach(h => h.onclick = () => { const f = h.dataset.sort; if (sortFelt === f) sortStig = !sortStig; else { sortFelt = f; sortStig = f === 'navn'; } velgMappe(id); });
+    filer.sort((a, b) => { const r = sortFelt === 'navn' ? samle.compare(a.filnavn, b.filnavn) : (a.bytes - b.bytes) || samle.compare(a.filnavn, b.filnavn); return sortStig ? r : -r; });
     // Undermapper som rader øverst (Frame.io-modellen): klikk → inn i mappa.
     const bytesI = new Map(); for (const f of data.filer) bytesI.set(f.mappeId || '', (bytesI.get(f.mappeId || '') || 0) + f.bytes);
     const underAv = mid => { const u = underMapper(mid); let b = 0; for (const [k, v] of bytesI) if (u.has(k)) b += v; return b; };
