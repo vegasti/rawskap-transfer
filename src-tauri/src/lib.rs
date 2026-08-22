@@ -56,6 +56,29 @@ fn chrono_lite() -> String {
 #[derive(Default)]
 pub struct Tilstand {
     avbryt: Arc<AtomicBool>,
+    ned_mbps: Arc<AtomicU64>, // 0 = ubegrenset
+    opp_mbps: Arc<AtomicU64>,
+}
+
+/// Enkel struping: hold gjennomsnittsfarten under taket ved å sove når vi
+/// ligger foran skjema (token-bucket-lite, målt fra jobbstart).
+struct Struper { start: std::time::Instant, bytes: AtomicU64, mbps: Arc<AtomicU64> }
+impl Struper {
+    fn ny(mbps: Arc<AtomicU64>) -> Arc<Self> { Arc::new(Self { start: std::time::Instant::now(), bytes: AtomicU64::new(0), mbps }) }
+    async fn tell(&self, n: u64) {
+        let tak = self.mbps.load(Ordering::Relaxed);
+        let sum = self.bytes.fetch_add(n, Ordering::Relaxed) + n;
+        if tak == 0 { return; }
+        let skal_ha_brukt = (sum as f64 * 8.0) / (tak as f64 * 1_000_000.0); // sekunder
+        let brukt = self.start.elapsed().as_secs_f64();
+        if skal_ha_brukt > brukt { tokio::time::sleep(std::time::Duration::from_secs_f64((skal_ha_brukt - brukt).min(2.0))).await; }
+    }
+}
+
+#[tauri::command]
+fn sett_nettverk(tilstand: State<'_, Tilstand>, ned_mbps: u64, opp_mbps: u64) {
+    tilstand.ned_mbps.store(ned_mbps, Ordering::Relaxed);
+    tilstand.opp_mbps.store(opp_mbps, Ordering::Relaxed);
 }
 
 fn klient(nokkel: &str) -> Result<reqwest::Client, String> {
@@ -104,10 +127,21 @@ async fn last_ned_en(
     fil: &Fil,
     rot: &Path,
     avbryt: &AtomicBool,
+    struper: &Struper,
+    konflikt: &str,
 ) -> Result<(), String> {
     let mappe = if fil.sti.is_empty() { rot.to_path_buf() } else { rot.join(&fil.sti) };
     tokio::fs::create_dir_all(&mappe).await.map_err(|e| format!("{e}"))?;
-    let maal = mappe.join(trygt_navn(&fil.filnavn));
+    let mut maal = mappe.join(trygt_navn(&fil.filnavn));
+    // Når fila finnes: 'hopp' (lik størrelse = ferdig, ellers overskriv — standard),
+    // 'begge' (nytt navn «navn (2).ext»), 'overskriv' (alltid på nytt).
+    if tokio::fs::metadata(&maal).await.is_ok() {
+        match konflikt {
+            "begge" => { let (stamme, ext) = match trygt_navn(&fil.filnavn).rsplit_once('.') { Some((a, b)) => (a.to_string(), format!(".{b}")), None => (trygt_navn(&fil.filnavn), String::new()) }; let mut n = 2; loop { let k = mappe.join(format!("{stamme} ({n}){ext}")); if tokio::fs::metadata(&k).await.is_err() { maal = k; break; } n += 1; } }
+            "overskriv" => { let _ = tokio::fs::remove_file(&maal).await; }
+            _ => {}
+        }
+    }
     let part = mappe.join(format!("{}.part", trygt_navn(&fil.filnavn)));
 
     if let Ok(m) = tokio::fs::metadata(&maal).await {
@@ -160,6 +194,7 @@ async fn last_ned_en(
         if avbryt.load(Ordering::Relaxed) { return Err("Avbrutt".into()); }
         let bit = bit.map_err(|e| format!("{e}"))?;
         f.write_all(&bit).await.map_err(|e| format!("{e}"))?;
+        struper.tell(bit.len() as u64).await;
         let n = hentet.fetch_add(bit.len() as u64, Ordering::Relaxed) + bit.len() as u64;
         if sist_meldt.elapsed().as_millis() > 150 {
             sist_meldt = std::time::Instant::now();
@@ -179,7 +214,7 @@ async fn last_ned_en(
 
 /// Last ned et sett filer til en mappe — `parallell` samtidige strømmer.
 #[tauri::command]
-async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String, nokkel: String, filer: Vec<Fil>, maal: String, parallell: usize, logg: bool, jobbnavn: String) -> Result<serde_json::Value, String> {
+async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String, nokkel: String, filer: Vec<Fil>, maal: String, parallell: usize, logg: bool, jobbnavn: String, konflikt: String) -> Result<serde_json::Value, String> {
     tilstand.avbryt.store(false, Ordering::Relaxed);
     let rot0 = PathBuf::from(&maal);
     tokio::fs::create_dir_all(&rot0).await.map_err(|e| format!("{e}"))?;
@@ -196,9 +231,11 @@ async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
     tokio::fs::create_dir_all(&rot).await.map_err(|e| format!("{e}"))?;
     let sem = Arc::new(Semaphore::new(parallell.clamp(1, 8)));
     let avbryt = tilstand.avbryt.clone();
+    let struper = Struper::ny(tilstand.ned_mbps.clone());
     let mut jobber = Vec::new();
     for fil in filer {
-        let (app, k, bare, portal, rot, sem, avbryt, loggen) = (app.clone(), k.clone(), bare.clone(), portal.clone(), rot.clone(), sem.clone(), avbryt.clone(), loggen.clone());
+        let (app, k, bare, portal, rot, sem, avbryt, loggen, struper) = (app.clone(), k.clone(), bare.clone(), portal.clone(), rot.clone(), sem.clone(), avbryt.clone(), loggen.clone(), struper.clone());
+        let konflikt = konflikt.clone();
         jobber.push(tokio::spawn(async move {
             let _p = sem.acquire().await;
             let sti = if fil.sti.is_empty() { rot.join(trygt_navn(&fil.filnavn)) } else { rot.join(&fil.sti).join(trygt_navn(&fil.filnavn)) };
@@ -208,7 +245,7 @@ async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
             // Inntil 3 forsøk per fil — resume gjør hvert forsøk billig.
             let mut res = Err("".into());
             for _ in 0..3 {
-                res = last_ned_en(&app, &k, &bare, &portal, &fil, &rot, &avbryt).await;
+                res = last_ned_en(&app, &k, &bare, &portal, &fil, &rot, &avbryt, &struper, &konflikt).await;
                 if res.is_ok() || avbryt.load(Ordering::Relaxed) { break; }
                 tokio::time::sleep(std::time::Duration::from_millis(800)).await;
             }
@@ -293,19 +330,19 @@ async fn sikre_mappe(k: &reqwest::Client, portal: &str, rot: &str, relativ_dir: 
 }
 
 /// Fil → byte-strøm m/ teller (PUT-framdrift).
-fn fil_strom(f: tokio::fs::File, mut tell: impl FnMut(u64) + Send + 'static) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
+fn fil_strom(f: tokio::fs::File, struper: Arc<Struper>, mut tell: impl FnMut(u64) + Send + 'static) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
     use tokio::io::AsyncReadExt;
-    futures_util::stream::unfold(f, |mut f| async move {
+    futures_util::stream::unfold((f, struper), |(mut f, struper)| async move {
         let mut buf = vec![0u8; 1 << 20];
         match f.read(&mut buf).await {
             Ok(0) => None,
-            Ok(n) => { buf.truncate(n); Some((Ok(bytes::Bytes::from(buf)), f)) }
-            Err(e) => Some((Err(e), f)),
+            Ok(n) => { buf.truncate(n); struper.tell(n as u64).await; Some((Ok(bytes::Bytes::from(buf)), (f, struper))) }
+            Err(e) => Some((Err(e), (f, struper))),
         }
     }).inspect(move |r| { if let Ok(b) = r { tell(b.len() as u64); } })
 }
 
-async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &AtomicBool) -> Result<(), String> {
+async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &AtomicBool, struper: Arc<Struper>) -> Result<(), String> {
     let navn = std::path::Path::new(&fil.sti).file_name().and_then(|n| n.to_str()).unwrap_or("fil").to_string();
     let mime = mime_fra(&navn);
     let meta = tokio::fs::metadata(&fil.sti).await.map_err(|e| format!("{e}"))?;
@@ -323,7 +360,7 @@ async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Clien
     let id = fil.sti.clone(); let app2 = app.clone();
     let sendt = Arc::new(AtomicU64::new(0)); let sendt2 = sendt.clone();
     let mut sist_meldt = std::time::Instant::now();
-    let strom = fil_strom(f, move |n| {
+    let strom = fil_strom(f, struper, move |n| {
         let t = sendt2.fetch_add(n, Ordering::Relaxed) + n;
         if sist_meldt.elapsed().as_millis() > 150 || t == bytes { sist_meldt = std::time::Instant::now(); let _ = app2.emit("framdrift", Framdrift { id: id.clone(), hentet: t, total: bytes, status: "laster".into(), feil: None }); }
     });
@@ -352,16 +389,17 @@ async fn last_opp(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
     let cache = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<String, String>::new()));
     let sem = Arc::new(Semaphore::new(parallell.clamp(1, 6)));
     let avbryt = tilstand.avbryt.clone();
+    let struper = Struper::ny(tilstand.opp_mbps.clone());
     let mut jobber = Vec::new();
     for fil in filer {
-        let (app, k, bare, portal, cache, sem, avbryt, mappe_id) = (app.clone(), k.clone(), bare.clone(), portal.clone(), cache.clone(), sem.clone(), avbryt.clone(), mappe_id.clone());
+        let (app, k, bare, portal, cache, sem, avbryt, mappe_id, struper) = (app.clone(), k.clone(), bare.clone(), portal.clone(), cache.clone(), sem.clone(), avbryt.clone(), mappe_id.clone(), struper.clone());
         jobber.push(tokio::spawn(async move {
             let _p = sem.acquire().await;
             if avbryt.load(Ordering::Relaxed) { return (fil.sti.clone(), Err::<(), String>("Avbrutt".into())); }
             let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: 0, total: fil.bytes, status: "laster".into(), feil: None });
             let rel_dir = std::path::Path::new(&fil.relativ).parent().map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
             let res = match sikre_mappe(&k, &portal, &mappe_id, &rel_dir, &cache).await {
-                Ok(mid) => { let mut r = Err(String::new()); for _ in 0..2 { r = last_opp_en(&app, &k, &bare, &portal, &fil, &mid, &avbryt).await; if r.is_ok() || avbryt.load(Ordering::Relaxed) { break; } } r }
+                Ok(mid) => { let mut r = Err(String::new()); for _ in 0..2 { r = last_opp_en(&app, &k, &bare, &portal, &fil, &mid, &avbryt, struper.clone()).await; if r.is_ok() || avbryt.load(Ordering::Relaxed) { break; } } r }
                 Err(e) => Err(e),
             };
             if let Err(e) = &res { let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: 0, total: fil.bytes, status: "feil".into(), feil: Some(e.clone()) }); }
@@ -416,8 +454,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_notification::init())
         .manage(Tilstand::default())
-        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, sett_nettverk, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
