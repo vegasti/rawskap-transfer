@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
+use tauri_plugin_shell::ShellExt;
+use base64::Engine;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 
@@ -297,6 +299,61 @@ async fn kobling_poll(portal: String, kode: String) -> Result<serde_json::Value,
     r.json::<serde_json::Value>().await.map_err(|e| format!("{e}"))
 }
 
+// ── VIDEO via ffmpeg-sidecar (22/8, Vegards valg): poster + scrubbe-sprite +
+// varighet/mål — SAMME kontrakt som nettleseren sender i fullfør, så serveren
+// er uendret. ffmpeg (LGPL-bygg) ligger som sidecar; ffprobe droppet (115 MB)
+// — metadata leses fra `ffmpeg -i` sin stderr.
+struct VideoInfo { bredde: u32, hoyde: u32, varighet: f64, poster: Option<String>, sprite: Option<String>, frames: u32 }
+
+fn er_video(navn: &str) -> bool { mime_fra(navn).starts_with("video/") || navn.to_ascii_lowercase().ends_with(".mxf") }
+
+async fn ffmpeg_ut(app: &AppHandle, args: &[String]) -> Result<(Vec<u8>, String), String> {
+    let cmd = app.shell().sidecar("ffmpeg").map_err(|e| format!("ffmpeg mangler: {e}"))?.args(args);
+    let out = cmd.output().await.map_err(|e| format!("ffmpeg: {e}"))?;
+    Ok((out.stdout, String::from_utf8_lossy(&out.stderr).to_string()))
+}
+
+fn parse_varighet(stderr: &str) -> f64 {
+    if let Some(i) = stderr.find("Duration: ") {
+        let t = &stderr[i + 10..]; let t = t.split(',').next().unwrap_or("").trim();
+        let d: Vec<f64> = t.split(':').filter_map(|x| x.trim().parse::<f64>().ok()).collect();
+        if d.len() == 3 { return d[0] * 3600.0 + d[1] * 60.0 + d[2]; }
+    }
+    0.0
+}
+fn parse_dim(stderr: &str) -> (u32, u32) {
+    for linje in stderr.lines().filter(|l| l.contains("Video:")) {
+        for ord in linje.split(|c: char| c == ' ' || c == ',') {
+            if let Some((a, b)) = ord.split_once('x') {
+                if let (Ok(w), Ok(h)) = (a.parse::<u32>(), b.parse::<u32>()) { if w >= 16 && h >= 16 { return (w, h); } }
+            }
+        }
+    }
+    (0, 0)
+}
+
+async fn video_info(app: &AppHandle, sti: &str) -> VideoInfo {
+    let mut v = VideoInfo { bredde: 0, hoyde: 0, varighet: 0.0, poster: None, sprite: None, frames: 0 };
+    let (_, err) = match ffmpeg_ut(app, &["-hide_banner".into(), "-i".into(), sti.into()]).await { Ok(x) => x, Err(_) => return v };
+    v.varighet = parse_varighet(&err);
+    let (w, h) = parse_dim(&err); v.bredde = w; v.hoyde = h;
+    // Poster: midten, men maks 5 s inn (som nettleseren). Maks 1280 bred.
+    let t = if v.varighet > 0.0 { (v.varighet / 2.0).min(5.0) } else { 1.0 };
+    if let Ok((png, _)) = ffmpeg_ut(app, &["-hide_banner".into(), "-loglevel".into(), "error".into(), "-ss".into(), format!("{t:.2}"), "-i".into(), sti.into(), "-frames:v".into(), "1".into(), "-vf".into(), "scale='min(1280,iw)':-2".into(), "-q:v".into(), "4".into(), "-f".into(), "image2".into(), "-c:v".into(), "mjpeg".into(), "-".into()]).await {
+        if png.len() > 1000 { v.poster = Some(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(&png))); }
+    }
+    // Sprite: N = clamp(round(dur), 12, 48) frames jevnt fordelt, 200 px høye, vannrett stripe.
+    if v.varighet > 0.5 {
+        let n = (v.varighet.round() as u32).clamp(12, 48);
+        let fps = n as f64 / v.varighet;
+        let vf = format!("fps={fps:.6},scale=-2:200,tile={n}x1");
+        if let Ok((jpg, _)) = ffmpeg_ut(app, &["-hide_banner".into(), "-loglevel".into(), "error".into(), "-i".into(), sti.into(), "-vf".into(), vf, "-frames:v".into(), "1".into(), "-q:v".into(), "5".into(), "-f".into(), "image2".into(), "-c:v".into(), "mjpeg".into(), "-".into()]).await {
+            if jpg.len() > 1000 { v.sprite = Some(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(&jpg))); v.frames = n; }
+        }
+    }
+    v
+}
+
 // ── OPPLASTING (22/8): samme løype som nettleseren — presign → PUT rett til
 // R2 → fullfør (serveren lager thumb/EXIF for bilder). Undermapper gjenskapes
 // i skapet (mapper-API, cache per sti). Video får ingen poster i v0.
@@ -370,8 +427,17 @@ async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Clien
         let _ = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "avbryt", "originalKeys": [key] })).send().await;
         return Err("Avbrutt".into());
     }
-    // 3) fullfør (server: thumb/EXIF/dedup for bilder)
-    let r = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "fullfor", "originalKey": key, "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) })).send().await.map_err(|e| format!("{e}"))?;
+    // 3) fullfør (server: thumb/EXIF/dedup for bilder; video: poster/sprite fra ffmpeg her)
+    let mut body = serde_json::json!({ "action": "fullfor", "originalKey": key, "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) });
+    if er_video(&navn) {
+        let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: bytes, total: bytes, status: "thumbs".into(), feil: None });
+        let vi = video_info(app, &fil.sti).await;
+        if vi.bredde > 0 { body["bredde"] = serde_json::json!(vi.bredde); body["hoyde"] = serde_json::json!(vi.hoyde); }
+        if vi.varighet > 0.0 { body["varighet"] = serde_json::json!(vi.varighet); }
+        if let Some(p) = vi.poster { body["posterBase64"] = serde_json::json!(p); }
+        if let Some(sp) = vi.sprite { body["spriteBase64"] = serde_json::json!(sp); body["spriteFrames"] = serde_json::json!(vi.frames); }
+    }
+    let r = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&body).send().await.map_err(|e| format!("{e}"))?;
     let st = r.status().as_u16();
     let d: serde_json::Value = r.json().await.unwrap_or(serde_json::json!({}));
     if !(200..300).contains(&st) { return Err(format!("fullfør: {}", d["error"].as_str().unwrap_or("feilet"))); }
