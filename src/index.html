@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="no">
+<html lang="no" id="html">
 <head>
 <meta charset="utf-8" />
 <title>Rawskap Transfer</title>
@@ -52,26 +52,26 @@
 <body>
 <header>
   <div class="logo">rawskap<small>transfer · v0</small></div>
-  <div class="høyre"><span id="konto" class="hjelp" style="color:#f5f0eb;opacity:.8"></span><button id="koble-fra" class="skjult">Koble fra</button></div>
+  <div class="høyre"><span id="konto" class="hjelp" style="color:#f5f0eb;opacity:.8"></span><button id="koble-fra" class="skjult" data-t="loggUt" title="Logger appen ut av kontoen — stopper også nedlastinger">Logg ut</button></div>
 </header>
 <main>
   <!-- Steg 1: kobling -->
   <section id="steg-kobling" class="kort">
-    <h2>Koble til skapet</h2>
-    <p>Logg inn i nettleseren — slik du pleier (e-post, Google eller Microsoft) — og trykk «Koble til» der. Appen kobles automatisk. Ingenting å kopiere.</p>
+    <h2 data-t="koble">Koble til skapet</h2>
+    <p data-t="kobleTekst">Logg inn i nettleseren — slik du pleier (e-post, Google eller Microsoft) — og trykk «Koble til» der. Appen kobles automatisk. Ingenting å kopiere.</p>
     <div class="rad">
-      <button class="btn primær" id="logg-inn">Logg inn i nettleseren</button>
+      <button class="btn primær" id="logg-inn" data-t="loggInn">Logg inn i nettleseren</button>
       <span id="kode-visning" class="skjult" style="font-family:ui-monospace,monospace;font-size:22px;letter-spacing:.15em;font-weight:700"></span>
       <span id="kobling-status" class="hjelp"></span>
     </div>
     <details style="margin-top:16px">
-      <summary class="hjelp" style="cursor:pointer">Avansert: annen adresse eller nøkkel</summary>
-      <label>Rawskap-adresse</label>
+      <summary class="hjelp" style="cursor:pointer" data-t="avansert">Avansert: annen adresse eller nøkkel</summary>
+      <label data-t="adresse">Rawskap-adresse</label>
       <input type="text" id="portal" value="https://rawskap.no" />
-      <label>Nøkkel (app-nøkkel eller API-nøkkel)</label>
+      <label data-t="nokkel">Nøkkel (app-nøkkel eller API-nøkkel)</label>
       <input type="password" id="nokkel" placeholder="lim inn nøkkelen …" />
       <div class="rad" style="margin-top:12px">
-        <button class="btn" id="koble">Koble til med nøkkel</button>
+        <button class="btn" id="koble" data-t="kobleNokkel">Koble til med nøkkel</button>
         <span id="kobling-feil" class="hjelp"></span>
       </div>
     </details>
@@ -79,18 +79,17 @@
 
   <!-- Steg 2: velg mappe -->
   <section id="steg-velg" class="kort skjult">
-    <h2>Hva skal hentes?</h2>
-    <p>Velg en mappe — undermapper følger med og gjenskapes på disk. Filer som allerede ligger der med riktig størrelse hoppes over, og avbrutte filer fortsetter der de slapp.</p>
+    <h2 data-t="hva">Hva skal hentes?</h2>
+    <p data-t="hvaTekst">Velg en mappe — undermapper følger med og gjenskapes på disk. Filer som allerede ligger der med riktig størrelse hoppes over, og avbrutte filer fortsetter der de slapp.</p>
     <div class="tre" id="tre"></div>
     <div class="oppsummering" id="oppsummering"></div>
-    <label>Last ned til</label>
+    <label data-t="til">Last ned til</label>
     <div class="rad">
       <input type="text" id="maal" placeholder="velg en mappe på disken …" readonly style="flex:1" />
-      <button class="btn" id="velg-maal">Bla …</button>
+      <button class="btn" id="velg-maal" data-t="bla">Bla …</button>
     </div>
     <div class="rad" style="margin-top:14px">
-      <button class="btn primær" id="start" disabled>⤓ Last ned</button>
-      <span class="hjelp">Parallelle strømmer: <select id="parallell"><option>2</option><option selected>3</option><option>4</option><option>6</option></select></span>
+      <button class="btn primær" id="start" disabled data-t="lastNed">⤓ Last ned</button>
     </div>
   </section>
 
@@ -101,9 +100,9 @@
     <div class="liste" id="liste"></div>
     <div id="feil-oppsummering" class="feilboks skjult"></div>
     <div class="rad" style="margin-top:14px">
-      <button class="btn farlig" id="avbryt">Avbryt</button>
-      <button class="btn" id="tilbake" class="skjult">← Velg en annen mappe</button>
-      <button class="btn" id="apne-mappe">Åpne mappa</button>
+      <button class="btn farlig" id="avbryt" data-t="avbryt">Avbryt nedlastingen</button>
+      <button class="btn" id="tilbake" data-t="tilbake">← Velg en annen mappe</button>
+      <button class="btn" id="apne-mappe" data-t="apne">Åpne mappa</button>
     </div>
   </section>
 </main>
@@ -113,6 +112,14 @@
   const { open } = window.__TAURI__.dialog;
   const { open: openShell } = window.__TAURI__.shell;
   const { load } = window.__TAURI__.store;
+
+  // ── Språk: systemspråk (norsk ellers engelsk) ──
+  const EN = { koble: 'Connect to your library', kobleTekst: 'Sign in in the browser — as you usually do (e-mail, Google or Microsoft) — and press “Connect” there. The app connects by itself. Nothing to copy.', loggInn: 'Sign in in the browser', avansert: 'Advanced: other address or key', adresse: 'Rawskap address', nokkel: 'Key (app key or API key)', kobleNokkel: 'Connect with key', hva: 'What to fetch?', hvaTekst: 'Pick a folder — subfolders come along and are recreated on disk. Files already there with the right size are skipped, and interrupted files resume where they stopped.', til: 'Download to', bla: 'Browse …', lastNed: '⤓ Download', parallell: 'Parallel streams:', avbryt: 'Cancel download', tilbake: '← Pick another folder', apne: 'Open folder', loggUt: 'Sign out',
+    lager: 'Creating code …', bekreft: 'Confirm the code in the browser …', koblet: 'Connected ✓', utlop: 'The code expired — try again.', forLang: 'Took too long — try again.', forrige: 'The previous connection no longer works — sign in again.', velgMaal: 'Download to', laster: 'Downloading …', ferdig: '✓ Done', feilet: 'failed', noenFeilet: 'Some files failed. Press “Download” again — they resume where they stopped.', stoppet: 'Stopped', venter: 'waiting', laDer: '✓ was there', ferdigKort: '✓ done', av: 'of', hele: 'Whole library', mapper: 'folders', filer: 'files' };
+  const NO = { lager: 'Lager kode …', bekreft: 'Bekreft koden i nettleseren …', koblet: 'Koblet ✓', utlop: 'Koden utløp — prøv igjen.', forLang: 'Tok for lang tid — prøv igjen.', forrige: 'Forrige kobling virker ikke lenger — logg inn på nytt.', velgMaal: 'Last ned til', laster: 'Laster ned …', ferdig: '✓ Ferdig', feilet: 'feilet', noenFeilet: 'Noen filer feilet. Trykk «Last ned» igjen — de fortsetter der de slapp.', stoppet: 'Stoppet', venter: 'venter', laDer: '✓ lå der', ferdigKort: '✓ ferdig', av: 'av', hele: 'Hele skapet', mapper: 'mapper', filer: 'filer' };
+  const erNo = /^(nb|nn|no|da|sv)/i.test(navigator.language || '');
+  const t = erNo ? NO : EN;
+  if (!erNo) { document.getElementById('html').lang = 'en'; document.querySelectorAll('[data-t]').forEach(el => { const v = EN[el.dataset.t]; if (v) el.textContent = v; }); }
 
   const $ = id => document.getElementById(id);
   const fmt = b => b >= 1e9 ? `${(b/1e9).toFixed(2)} GB` : b >= 1e6 ? `${(b/1e6).toFixed(1)} MB` : `${Math.round(b/1e3)} kB`;
@@ -128,7 +135,7 @@
     portal = p.trim().replace(/\/$/, ''); nokkel = n.trim();
     data = await invoke('hent_liste', { portal, nokkel, mappe: '' });
     await store.set('kobling', { portal, nokkel });
-    $('konto').textContent = `${data.mapper.length} mapper · ${data.filer.length} filer · ${fmt(data.totalBytes)}`;
+    $('konto').textContent = `${data.mapper.length} ${t.mapper} · ${data.filer.length} ${t.filer} · ${fmt(data.totalBytes)}`;
     $('koble-fra').classList.remove('skjult');
     $('steg-kobling').classList.add('skjult'); $('steg-velg').classList.remove('skjult');
     tegnTre();
@@ -137,21 +144,21 @@
   let pollStopp = false;
   $('logg-inn').onclick = async () => {
     const p = ($('portal').value || 'https://rawskap.no').trim().replace(/\/$/, '');
-    $('logg-inn').disabled = true; $('kobling-status').textContent = 'Lager kode …';
+    $('logg-inn').disabled = true; $('kobling-status').textContent = t.lager;
     try {
-      const d = await invoke('kobling_start', { portal: p, maskin: navigator.platform || 'denne maskinen' });
+      const d = await invoke('kobling_start', { portal: p, maskin: await invoke('maskinnavn') });
       if (!d.ok) throw new Error(d.error || 'Kunne ikke lage kode');
       $('kode-visning').textContent = d.kode.slice(0, 3) + '-' + d.kode.slice(3); $('kode-visning').classList.remove('skjult');
-      $('kobling-status').textContent = 'Bekreft koden i nettleseren …';
+      $('kobling-status').textContent = t.bekreft;
       openShell(p + (/rawskap\.no/.test(p) ? '/app' : '/rawskap/app') + '?kode=' + d.kode);
       pollStopp = false;
       for (let i = 0; i < 300 && !pollStopp; i++) {
         await new Promise(r => setTimeout(r, 2000));
         const s = await invoke('kobling_poll', { portal: p, kode: d.kode });
-        if (s.ok && s.nokkel) { $('kobling-status').textContent = 'Koblet ✓'; await kobleMed(p, s.nokkel); return; }
-        if (s.utlopt) throw new Error('Koden utløp — prøv igjen.');
+        if (s.ok && s.nokkel) { $('kobling-status').textContent = t.koblet; await kobleMed(p, s.nokkel); return; }
+        if (s.utlopt) throw new Error(t.utlop);
       }
-      throw new Error('Tok for lang tid — prøv igjen.');
+      throw new Error(t.forLang);
     } catch (e) { $('kobling-status').textContent = String(e.message || e); $('kode-visning').classList.add('skjult'); }
     finally { $('logg-inn').disabled = false; }
   };
@@ -163,7 +170,7 @@
   // Koble fra = stopp ALLE jobber først (Rust-laget lever videre gjennom en reload).
   $('koble-fra').onclick = async () => { await invoke('avbryt'); await new Promise(r => setTimeout(r, 400)); await store.delete('kobling'); location.reload(); };
   await invoke('avbryt'); // oppstart/reload: ingen gjenglemt jobb skal fortsette uten UI
-  if (lagret?.nokkel) { try { await kobleMed(lagret.portal, lagret.nokkel); } catch (e) { $('kobling-status').textContent = 'Forrige kobling virker ikke lenger — logg inn på nytt.'; } }
+  if (lagret?.nokkel) { try { await kobleMed(lagret.portal, lagret.nokkel); } catch (e) { $('kobling-status').textContent = t.forrige; } }
 
   // ── Mappetre ──
   function tegnTre() {
@@ -179,7 +186,7 @@
       tre.appendChild(b);
       for (const m of barnAv(id)) rad(m.id, m.navn, dybde + 1);
     };
-    rad('', 'Hele skapet', 0);
+    rad('', t.hele, 0);
   }
   async function velgFiler() {
     const under = new Set();
@@ -189,11 +196,11 @@
     // Stier relativt til valgt mappe regnes av portalen — hent lista på nytt for mappa.
     const d = await invoke('hent_liste', { portal, nokkel, mappe: valgtMappe });
     filer = d.filer;
-    $('oppsummering').textContent = `${filer.length} filer · ${fmt(d.totalBytes)}`;
+    $('oppsummering').textContent = `${filer.length} ${t.filer} · ${fmt(d.totalBytes)}`;
     $('start').disabled = !filer.length || !maal;
   }
   $('velg-maal').onclick = async () => {
-    const v = await open({ directory: true, multiple: false, title: 'Last ned til' });
+    const v = await open({ directory: true, multiple: false, title: t.velgMaal });
     if (v) { maal = v; $('maal').value = v; await store.set('maal', v); $('start').disabled = !filer.length; }
   };
 
@@ -202,14 +209,14 @@
   let totalBytes = 0;
   function tegnFil(f) {
     const el = document.createElement('div'); el.className = 'fil'; el.id = 'f-' + f.id;
-    el.innerHTML = `<div class="navn" title="${f.filnavn}">${f.filnavn}<div class="sti">${f.sti || ''}</div></div><div class="bar"><i></i></div><div class="status">venter</div>`;
+    el.innerHTML = `<div class="navn" title="${f.filnavn}">${f.filnavn}<div class="sti">${f.sti || ''}</div></div><div class="bar"><i></i></div><div class="status">${t.venter}</div>`;
     $('liste').appendChild(el);
   }
   function oppdaterTotal() {
     let hentet = 0, ferdig = 0, feil = 0;
     for (const f of filer) { const t = tilstand.get(f.id); if (!t) continue; hentet += t.status === 'ferdig' || t.status === 'hoppet' ? f.bytes : t.hentet; if (t.status === 'ferdig' || t.status === 'hoppet') ferdig++; if (t.status === 'feil') feil++; }
     $('total-bar').style.width = totalBytes ? `${Math.min(100, hentet / totalBytes * 100)}%` : '0%';
-    $('total-tekst').textContent = `${ferdig} av ${filer.length} · ${fmt(hentet)} / ${fmt(totalBytes)}${feil ? ` · ${feil} feilet` : ''}`;
+    $('total-tekst').textContent = `${ferdig} ${t.av} ${filer.length} · ${fmt(hentet)} / ${fmt(totalBytes)}${feil ? ` · ${feil} ${t.feilet}` : ''}`;
   }
   await listen('framdrift', ev => {
     const p = ev.payload; tilstand.set(p.id, p);
@@ -217,7 +224,7 @@
     el.className = 'fil ' + p.status;
     const pst = p.total ? Math.min(100, p.hentet / p.total * 100) : 0;
     el.querySelector('.bar i').style.width = p.status === 'ferdig' || p.status === 'hoppet' ? '100%' : `${pst}%`;
-    el.querySelector('.status').textContent = p.status === 'ferdig' ? '✓ ferdig' : p.status === 'hoppet' ? '✓ lå der' : p.status === 'feil' ? '✕ ' + (p.feil || 'feil') : `${fmt(p.hentet)} / ${fmt(p.total)}`;
+    el.querySelector('.status').textContent = p.status === 'ferdig' ? t.ferdigKort : p.status === 'hoppet' ? t.laDer : p.status === 'feil' ? '✕ ' + (p.feil || 'feil') : `${fmt(p.hentet)} / ${fmt(p.total)}`;
     if (p.status === 'feil') el.title = p.feil || '';
     oppdaterTotal();
   });
@@ -226,13 +233,13 @@
     $('liste').innerHTML = ''; tilstand.clear(); $('feil-oppsummering').classList.add('skjult');
     totalBytes = filer.reduce((s, f) => s + f.bytes, 0);
     for (const f of filer) tegnFil(f);
-    $('laster-tittel').textContent = 'Laster ned …'; $('avbryt').disabled = false;
+    $('laster-tittel').textContent = t.laster; $('avbryt').disabled = false;
     oppdaterTotal();
     try {
-      const res = await invoke('last_ned', { portal, nokkel, filer: filer.map(f => ({ id: f.id, filnavn: f.filnavn, bytes: f.bytes, sti: f.sti })), maal, parallell: Number($('parallell').value) });
-      $('laster-tittel').textContent = res.feil.length ? `Ferdig — ${res.ok} ok, ${res.feil.length} feilet` : `✓ Ferdig — ${res.ok} filer`;
-      if (res.feil.length) { $('feil-oppsummering').textContent = 'Noen filer feilet. Trykk «Last ned» igjen — de fortsetter der de slapp.'; $('feil-oppsummering').classList.remove('skjult'); }
-    } catch (e) { $('laster-tittel').textContent = 'Stoppet'; $('feil-oppsummering').textContent = String(e); $('feil-oppsummering').classList.remove('skjult'); }
+      const res = await invoke('last_ned', { portal, nokkel, filer: filer.map(f => ({ id: f.id, filnavn: f.filnavn, bytes: f.bytes, sti: f.sti })), maal, parallell: 3 });
+      $('laster-tittel').textContent = res.feil.length ? `${t.ferdig} — ${res.ok} ok, ${res.feil.length} ${t.feilet}` : `${t.ferdig} — ${res.ok} ${t.filer}`;
+      if (res.feil.length) { $('feil-oppsummering').textContent = t.noenFeilet; $('feil-oppsummering').classList.remove('skjult'); }
+    } catch (e) { $('laster-tittel').textContent = t.stoppet; $('feil-oppsummering').textContent = String(e); $('feil-oppsummering').classList.remove('skjult'); }
     $('avbryt').disabled = true;
   };
   $('avbryt').onclick = () => invoke('avbryt');

@@ -193,6 +193,12 @@ async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
     Ok(serde_json::json!({ "ok": ok, "feil": feil }))
 }
 
+/// Maskinnavn til koblingssiden («Koblet til — VEGARD-PC»), ikke «Win32».
+#[tauri::command]
+fn maskinnavn() -> String {
+    std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "denne maskinen".into())
+}
+
 /// Device-kobling (webviewen kan ikke fetch-e portalen — CORS): start → kode.
 #[tauri::command]
 async fn kobling_start(portal: String, maskin: String) -> Result<serde_json::Value, String> {
@@ -224,7 +230,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(Tilstand::default())
-        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, avbryt, kobling_start, kobling_poll])
+        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
