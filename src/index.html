@@ -13,7 +13,7 @@
   header .logo small { font-weight:400; font-size:12px; opacity:.75; margin-left:6px; letter-spacing:.08em; text-transform:uppercase; }
   header .høyre { margin-left:auto; font-size:12.5px; opacity:.9; display:flex; gap:10px; align-items:center; }
   header button { background:none; border:1px solid rgba(245,240,235,.4); color:#f5f0eb; border-radius:4px; padding:5px 10px; font:inherit; font-size:12px; cursor:pointer; }
-  .skall { flex:1; display:grid; grid-template-columns:250px 1fr; min-height:0; }
+  .skall { flex:1; display:grid; grid-template-columns:240px minmax(0,1fr); min-height:0; }
   aside { background:var(--side); border-right:1px solid var(--kant); overflow:auto; padding:10px 8px; }
   aside .tre button { width:100%; text-align:left; background:none; border:none; color:inherit; font:inherit; padding:6px 9px; border-radius:6px; cursor:pointer; display:flex; gap:8px; align-items:center; white-space:nowrap; }
   aside .tre button:hover { background:rgba(50,95,78,.1); }
@@ -21,7 +21,8 @@
   aside .tre .dybde1 { padding-left:26px; } aside .tre .dybde2 { padding-left:42px; } aside .tre .dybde3 { padding-left:58px; } aside .tre .dybde4 { padding-left:74px; }
   aside .tre small { margin-left:auto; font-size:11px; opacity:.6; }
   .hoved { display:flex; flex-direction:column; min-height:0; }
-  .verktøy { display:flex; align-items:center; gap:10px; padding:12px 18px; border-bottom:1px solid var(--kant); flex:0 0 auto; }
+  .verktøy { display:flex; align-items:center; gap:10px; padding:12px 18px; border-bottom:1px solid var(--kant); flex:0 0 auto; flex-wrap:wrap; row-gap:8px; }
+  .verktøy h2 { flex:1 1 160px; }
   .verktøy h2 { font-family:Georgia,serif; font-size:18px; margin:0; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .verktøy .meta { font-size:12.5px; color:var(--svak); white-space:nowrap; }
   .btn { padding:8px 14px; border-radius:7px; border:1px solid var(--kant); background:transparent; color:inherit; font:inherit; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; }

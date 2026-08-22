@@ -10,12 +10,12 @@
     "windows": [
       {
         "title": "Rawskap Transfer",
-        "width": 960,
-        "height": 680,
+        "width": 1180,
+        "height": 760,
         "resizable": true,
         "fullscreen": false,
-        "minWidth": 720,
-        "minHeight": 520
+        "minWidth": 1060,
+        "minHeight": 640
       }
     ],
     "security": {
