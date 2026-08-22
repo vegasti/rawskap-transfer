@@ -629,6 +629,15 @@ async fn ny_mappe(portal: String, nokkel: String, navn: String, forelder: String
     Ok(d)
 }
 
+/// Legg filer i papirkurven (brukes av «Erstatt» ved opplasting).
+#[tauri::command]
+async fn slett_filer(portal: String, nokkel: String, ids: Vec<String>) -> Result<(), String> {
+    let k = klient(&nokkel)?;
+    let r = k.post(format!("{}/api/rawskap/slett", portal.trim_end_matches('/'))).json(&serde_json::json!({ "assetIds": ids })).send().await.map_err(|e| format!("{e}"))?;
+    if !r.status().is_success() { return Err(format!("Kunne ikke slette ({})", r.status())); }
+    Ok(())
+}
+
 #[tauri::command]
 async fn er_mappe(sti: String) -> bool { tokio::fs::metadata(&sti).await.map(|m| m.is_dir()).unwrap_or(false) }
 
@@ -645,7 +654,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_notification::init())
         .manage(Tilstand::default())
-        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, sett_nettverk, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, slett_filer, sett_nettverk, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
