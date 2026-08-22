@@ -117,6 +117,8 @@
       <span class="meta" id="mappe-meta"></span>
       <label class="bryter" style="margin:0"><input type="checkbox" id="logg-bryter" /> <span data-t="skrivLogg">Skriv logg</span></label>
       <button class="btn liten" id="velg-maal"><span data-t="til">Last ned til</span>: <span id="maal-navn">…</span></button>
+      <button class="btn" id="last-opp-filer" data-t="lastOppFiler">⤒ Last opp filer</button>
+      <button class="btn" id="last-opp-mappe" data-t="lastOppMappe">⤒ Last opp mappe</button>
       <button class="btn primær" id="last-ned-mappe" data-t="lastNedMappe">⤓ Last ned mappa</button>
     </div>
     <div class="filer" id="filer"></div>
@@ -140,9 +142,9 @@
   const { open: openShell } = window.__TAURI__.shell;
   const { load } = window.__TAURI__.store;
 
-  const EN = { koble: 'Connect to your library', kobleTekst: 'Sign in in the browser — as you usually do (e-mail, Google or Microsoft) — and press “Connect” there. The app connects by itself. Nothing to copy.', loggInn: 'Sign in in the browser', avansert: 'Advanced: other address or key', adresse: 'Rawskap address', nokkel: 'Key (app key or API key)', kobleNokkel: 'Connect with key', til: 'Download to', lastNedMappe: '⤓ Download folder', overforinger: 'Transfers', ingenOverf: 'No transfers', loggUt: 'Sign out', skrivLogg: 'Write log',
+  const EN = { koble: 'Connect to your library', kobleTekst: 'Sign in in the browser — as you usually do (e-mail, Google or Microsoft) — and press “Connect” there. The app connects by itself. Nothing to copy.', loggInn: 'Sign in in the browser', avansert: 'Advanced: other address or key', adresse: 'Rawskap address', nokkel: 'Key (app key or API key)', kobleNokkel: 'Connect with key', til: 'Download to', lastNedMappe: '⤓ Download folder', lastOppFiler: '⤒ Upload files', lastOppMappe: '⤒ Upload folder', oppTil: 'to', opplasting: 'upload', videoUtenPoster: 'Videos get no poster image in this version — the card shows a file icon until the library processes it.', overforinger: 'Transfers', ingenOverf: 'No transfers', loggUt: 'Sign out', skrivLogg: 'Write log',
     lager: 'Creating code …', bekreft: 'Confirm the code in the browser …', koblet: 'Connected ✓', utlop: 'The code expired — try again.', forLang: 'Took too long — try again.', forrige: 'The previous connection no longer works — sign in again.', velgMaal: 'Download to', hele: 'Whole library', mapper: 'folders', filer: 'files', fil: 'file', tomMappe: 'No files in this folder.', navn: 'Name', storrelse: 'Size', hent: 'Download', venter: 'waiting', laDer: 'was there', ferdig: 'done', feilet: 'failed', avbrutt: 'cancelled', iKo: 'queued', avbryt: 'Cancel', apneRawskap: 'Open in Rawskap', visUtforsker: 'Show in File Explorer', visLogg: 'Show log', fjern: 'Remove from list', provIgjen: 'Try again', velgMaalForst: 'Pick a download folder first' };
-  const NO = { til: 'Last ned til', lager: 'Lager kode …', bekreft: 'Bekreft koden i nettleseren …', koblet: 'Koblet ✓', utlop: 'Koden utløp — prøv igjen.', forLang: 'Tok for lang tid — prøv igjen.', forrige: 'Forrige kobling virker ikke lenger — logg inn på nytt.', velgMaal: 'Last ned til', hele: 'Hele skapet', mapper: 'mapper', filer: 'filer', fil: 'fil', tomMappe: 'Ingen filer i denne mappa.', navn: 'Navn', storrelse: 'Størrelse', hent: 'Last ned', venter: 'venter', laDer: 'lå der', ferdig: 'ferdig', feilet: 'feilet', avbrutt: 'avbrutt', iKo: 'i kø', avbryt: 'Avbryt', apneRawskap: 'Åpne i Rawskap', visUtforsker: 'Vis i Utforsker', visLogg: 'Vis logg', fjern: 'Fjern fra lista', provIgjen: 'Prøv igjen', velgMaalForst: 'Velg en nedlastingsmappe først', ingenOverf: 'Ingen overføringer' };
+  const NO = { til: 'Last ned til', oppTil: 'til', opplasting: 'opplasting', videoUtenPoster: 'Video får ikke plakatbilde i denne versjonen — kortet viser filikon til skapet har behandlet den.', lager: 'Lager kode …', bekreft: 'Bekreft koden i nettleseren …', koblet: 'Koblet ✓', utlop: 'Koden utløp — prøv igjen.', forLang: 'Tok for lang tid — prøv igjen.', forrige: 'Forrige kobling virker ikke lenger — logg inn på nytt.', velgMaal: 'Last ned til', hele: 'Hele skapet', mapper: 'mapper', filer: 'filer', fil: 'fil', tomMappe: 'Ingen filer i denne mappa.', navn: 'Navn', storrelse: 'Størrelse', hent: 'Last ned', venter: 'venter', laDer: 'lå der', ferdig: 'ferdig', feilet: 'feilet', avbrutt: 'avbrutt', iKo: 'i kø', avbryt: 'Avbryt', apneRawskap: 'Åpne i Rawskap', visUtforsker: 'Vis i Utforsker', visLogg: 'Vis logg', fjern: 'Fjern fra lista', provIgjen: 'Prøv igjen', velgMaalForst: 'Velg en nedlastingsmappe først', ingenOverf: 'Ingen overføringer' };
   const erNo = /^(nb|nn|no|da|sv)/i.test(navigator.language || '');
   const t = erNo ? NO : EN;
   if (!erNo) { document.getElementById('html').lang = 'en'; document.querySelectorAll('[data-t]').forEach(el => { const v = EN[el.dataset.t]; if (v) el.textContent = v; }); }
@@ -229,6 +231,22 @@
     }
   }
   $('velg-maal').onclick = async () => { const v = await open({ directory: true, multiple: false, title: t.velgMaal }); if (v) { maal = v; await store.set('maal', v); visMaal(); } };
+  const lokalNavn = s => s.split(/[\\/]/).filter(Boolean).slice(-1)[0] || s;
+  $('last-opp-filer').onclick = async () => {
+    const v = await open({ multiple: true, directory: false, title: t.lastOppFiler });
+    const liste = Array.isArray(v) ? v : v ? [v] : []; if (!liste.length) return;
+    const filer = []; for (const sti of liste) { const l = await invoke('les_mappe', { sti: sti.replace(/[\\/][^\\/]+$/, '') }); const f = l.find(x => x.sti === sti); if (f) filer.push({ sti: f.sti, relativ: lokalNavn(f.sti), bytes: f.bytes, filnavn: lokalNavn(f.sti), id: f.sti }); }
+    if (filer.some(f => /\.(mp4|mov|mxf|avi|mkv)$/i.test(f.filnavn))) $('overf-tekst').textContent = t.videoUtenPoster;
+    startJobb(`${filer.length === 1 ? filer[0].filnavn : filer.length + ' ' + t.filer} → ${mappeNavn(valgtMappe)}`, filer, valgtMappe, false, 'opp');
+  };
+  $('last-opp-mappe').onclick = async () => {
+    const v = await open({ directory: true, multiple: false, title: t.lastOppMappe }); if (!v) return;
+    const l = await invoke('les_mappe', { sti: v }); if (!l.length) return;
+    const navn = lokalNavn(v);
+    // Mappa selv gjenskapes i skapet under valgt mappe (relativ sti får mappenavnet som rot).
+    const filer = l.map(f => ({ sti: f.sti, relativ: navn + '/' + f.relativ, bytes: f.bytes, filnavn: lokalNavn(f.sti), id: f.sti }));
+    startJobb(`${navn} → ${mappeNavn(valgtMappe)}`, filer, valgtMappe, false, 'opp');
+  };
   $('last-ned-mappe').onclick = async () => { const d = await invoke('hent_liste', { portal, nokkel, mappe: valgtMappe }); startJobb(mappeNavn(valgtMappe), d.filer, valgtMappe, true); };
 
   // ── Overføringer: jobbkø, én jobb om gangen (3 strømmer) ──
@@ -236,9 +254,9 @@
   const filTilstand = new Map();
   $('overf-linje').onclick = () => $('overf').classList.toggle('åpen');
   document.addEventListener('click', e => { if (!e.target.closest('.meny') && !e.target.closest('.meny-knapp')) document.querySelectorAll('.meny.åpen').forEach(m => m.classList.remove('åpen')); });
-  function startJobb(navn, filer, mappeId, erMappe) {
+  function startJobb(navn, filer, mappeId, erMappe, type = 'ned') {
     if (!maal) { $('overf').classList.add('åpen'); $('overf-tekst').textContent = t.velgMaalForst; $('velg-maal').click(); return; }
-    const j = { id: 'j' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), navn, mappeId, filer: filer.map(f => ({ id: f.id, filnavn: f.filnavn, bytes: f.bytes, sti: f.sti || '' })), maal: erMappe && mappeId ? `${maal}/${navn.replace(/[\\/:*?"<>|]+/g, '_')}` : maal, status: 'kø', ok: 0, feil: [], logg: $('logg-bryter').checked };
+    const j = { id: 'j' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type, navn, mappeId, filer: type === 'opp' ? filer : filer.map(f => ({ id: f.id, filnavn: f.filnavn, bytes: f.bytes, sti: f.sti || '' })), maal: erMappe && mappeId ? `${maal}/${navn.replace(/[\\/:*?"<>|]+/g, '_')}` : maal, status: 'kø', ok: 0, feil: [], logg: $('logg-bryter').checked };
     jobber.unshift(j); tegnJobber(); $('overf').classList.add('åpen'); kjørNeste();
   }
   async function kjørNeste() {
@@ -246,7 +264,10 @@
     const j = jobber.find(x => x.status === 'kø'); if (!j) { oppdaterLinje(); return; }
     aktiv = j; j.status = 'laster'; tegnJobber();
     try {
-      const res = await invoke('last_ned', { portal, nokkel, filer: j.filer, maal: j.maal, parallell: 3, logg: j.logg, jobbnavn: j.navn });
+      const res = j.type === 'opp'
+        ? await invoke('last_opp', { portal, nokkel, filer: j.filer.map(f => ({ sti: f.sti, relativ: f.relativ, bytes: f.bytes })), mappeId: j.mappeId || '', parallell: 3 })
+        : await invoke('last_ned', { portal, nokkel, filer: j.filer, maal: j.maal, parallell: 3, logg: j.logg, jobbnavn: j.navn });
+      if (j.type === 'opp') { try { data = await invoke('hent_liste', { portal, nokkel, mappe: '' }); $('konto').textContent = `${data.mapper.length} ${t.mapper} · ${data.filer.length} ${t.filer} · ${fmt(data.totalBytes)}`; velgMappe(valgtMappe); } catch { /* */ } }
       j.ok = res.ok; j.feil = res.feil || [];
       j.status = j.feil.some(f => /^Avbrutt$/i.test(f.feil || '')) ? 'avbrutt' : j.feil.length ? 'feil' : 'ferdig';
     } catch (e) { j.status = 'feil'; j.feil = [{ feil: String(e) }]; }
@@ -270,7 +291,7 @@
       const el = document.createElement('div'); el.className = 'jobb' + (j === aktiv ? ' åpen' : ''); el.id = 'jb-' + j.id;
       const k = jobbTall(j);
       const statusTekst = j.status === 'kø' ? t.iKo : j.status === 'laster' ? `${k.ferdig} / ${j.filer.length} · ${fmt(k.hentet)} / ${fmt(k.total)}` : j.status === 'ferdig' ? `✓ ${t.ferdig} · ${fmt(k.total)}` : j.status === 'avbrutt' ? t.avbrutt : `${j.ok} ok · ${j.feil.length} ${t.feilet}`;
-      el.innerHTML = `<div class="jobb-hode"><span class="navn">${j.navn}<small>${j.filer.length} ${j.filer.length === 1 ? t.fil : t.filer}</small></span><div class="bar"><i style="width:${j.status === 'ferdig' ? 100 : k.total ? Math.min(100, k.hentet / k.total * 100) : 0}%"></i></div><span class="status">${statusTekst}</span><span class="rad"></span></div><div class="jobb-filer"></div>`;
+      el.innerHTML = `<div class="jobb-hode"><span class="navn">${j.type === 'opp' ? '⤒ ' : '⤓ '}${j.navn}<small>${j.filer.length} ${j.filer.length === 1 ? t.fil : t.filer}</small></span><div class="bar"><i style="width:${j.status === 'ferdig' ? 100 : k.total ? Math.min(100, k.hentet / k.total * 100) : 0}%"></i></div><span class="status">${statusTekst}</span><span class="rad"></span></div><div class="jobb-filer"></div>`;
       const rad = el.querySelector('.rad');
       const knapp = (tekst, cls, fn) => { const b = document.createElement('button'); b.className = 'btn liten ' + (cls || ''); b.textContent = tekst; b.onclick = e => { e.stopPropagation(); fn(); }; rad.appendChild(b); return b; };
       if (j.status === 'laster') knapp(t.avbryt, 'farlig', () => invoke('avbryt'));
@@ -280,13 +301,13 @@
       const meny = document.createElement('div'); meny.className = 'meny';
       const mi = (tekst, fn) => { const b = document.createElement('button'); b.textContent = tekst; b.onclick = e => { e.stopPropagation(); meny.classList.remove('åpen'); fn(); }; meny.appendChild(b); };
       mi(t.apneRawskap, () => openShell(portal + (/rawskap\.no/.test(portal) ? '' : '/rawskap') + (j.mappeId ? `?mappe=${j.mappeId}` : '')));
-      mi(t.visUtforsker, () => openShell(j.maal));
-      if (j.logg) mi(t.visLogg, () => openShell(j.maal));
+      mi(t.visUtforsker, () => openShell(j.type === 'opp' ? j.filer[0].sti.replace(/[\\/][^\\/]+$/, '') : j.maal));
+      if (j.logg && j.type !== 'opp') mi(t.visLogg, () => openShell(j.maal));
       if (j.status !== 'laster') { meny.appendChild(document.createElement('hr')); mi(t.fjern, () => { jobber.splice(jobber.indexOf(j), 1); tegnJobber(); oppdaterLinje(); }); }
       rad.appendChild(meny);
       el.querySelector('.jobb-hode').onclick = e => { if (e.target.closest('.rad')) return; el.classList.toggle('åpen'); };
       const liste = el.querySelector('.jobb-filer');
-      for (const f of j.filer.slice(0, 500)) { const s = filTilstand.get(f.id); const r = document.createElement('div'); r.className = 'fil ' + (s?.status || ''); r.id = 'f-' + f.id; r.innerHTML = `<span class="navn" title="${f.sti ? f.sti + '/' : ''}${f.filnavn}">${f.filnavn}</span><div class="bar"><i style="width:${s ? (s.status === 'ferdig' || s.status === 'hoppet' ? 100 : s.total ? Math.min(100, s.hentet / s.total * 100) : 0) : 0}%"></i></div><span class="status">${s ? (s.status === 'ferdig' ? `✓ ${t.ferdig}` : s.status === 'hoppet' ? `✓ ${t.laDer}` : s.status === 'feil' ? `✕ ${s.feil || t.feilet}` : `${fmt(s.hentet)} / ${fmt(s.total)}`) : t.venter}</span>`; liste.appendChild(r); }
+      for (const f of j.filer.slice(0, 500)) { const s = filTilstand.get(f.id || f.sti); const r = document.createElement('div'); r.className = 'fil ' + (s?.status || ''); r.id = 'f-' + f.id; r.innerHTML = `<span class="navn" title="${f.sti ? f.sti + '/' : ''}${f.filnavn}">${f.filnavn}</span><div class="bar"><i style="width:${s ? (s.status === 'ferdig' || s.status === 'hoppet' ? 100 : s.total ? Math.min(100, s.hentet / s.total * 100) : 0) : 0}%"></i></div><span class="status">${s ? (s.status === 'ferdig' ? `✓ ${t.ferdig}` : s.status === 'hoppet' ? `✓ ${t.laDer}` : s.status === 'feil' ? `✕ ${s.feil || t.feilet}` : `${fmt(s.hentet)} / ${fmt(s.total)}`) : t.venter}</span>`; liste.appendChild(r); }
       p.appendChild(el);
     }
     oppdaterLinje();

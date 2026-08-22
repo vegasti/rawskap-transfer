@@ -260,6 +260,137 @@ async fn kobling_poll(portal: String, kode: String) -> Result<serde_json::Value,
     r.json::<serde_json::Value>().await.map_err(|e| format!("{e}"))
 }
 
+// ── OPPLASTING (22/8): samme løype som nettleseren — presign → PUT rett til
+// R2 → fullfør (serveren lager thumb/EXIF for bilder). Undermapper gjenskapes
+// i skapet (mapper-API, cache per sti). Video får ingen poster i v0.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct OppFil { pub sti: String, pub relativ: String, pub bytes: u64 }
+
+fn mime_fra(navn: &str) -> &'static str {
+    let e = navn.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match e.as_str() {
+        "jpg" | "jpeg" => "image/jpeg", "png" => "image/png", "webp" => "image/webp", "gif" => "image/gif", "heic" => "image/heic", "tif" | "tiff" => "image/tiff",
+        "dng" => "image/x-adobe-dng", "arw" => "image/x-sony-arw", "cr2" => "image/x-canon-cr2", "cr3" => "image/x-canon-cr3", "nef" => "image/x-nikon-nef", "raf" => "image/x-fuji-raf",
+        "mp4" => "video/mp4", "mov" => "video/quicktime", "mxf" => "application/mxf", "pdf" => "application/pdf", _ => "application/octet-stream",
+    }
+}
+
+fn mappe_json(id: &str) -> serde_json::Value { if id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(id.to_string()) } }
+
+async fn sikre_mappe(k: &reqwest::Client, portal: &str, rot: &str, relativ_dir: &str, cache: &tokio::sync::Mutex<std::collections::HashMap<String, String>>) -> Result<String, String> {
+    if relativ_dir.is_empty() { return Ok(rot.to_string()); }
+    let mut forelder = rot.to_string(); let mut sti = String::new();
+    for del in relativ_dir.split('/').filter(|d| !d.is_empty()) {
+        sti = if sti.is_empty() { del.to_string() } else { format!("{sti}/{del}") };
+        let mut c = cache.lock().await;
+        if let Some(id) = c.get(&sti) { forelder = id.clone(); continue; }
+        let r = k.post(format!("{}/api/rawskap/mapper", portal)).json(&serde_json::json!({ "navn": del, "forelderId": mappe_json(&forelder) })).send().await.map_err(|e| format!("{e}"))?;
+        let d: serde_json::Value = r.json().await.map_err(|e| format!("{e}"))?;
+        let id = d["id"].as_str().ok_or_else(|| format!("Kunne ikke lage mappe «{del}»: {}", d["error"].as_str().unwrap_or("?")))?.to_string();
+        c.insert(sti.clone(), id.clone()); forelder = id;
+    }
+    Ok(forelder)
+}
+
+/// Fil → byte-strøm m/ teller (PUT-framdrift).
+fn fil_strom(f: tokio::fs::File, mut tell: impl FnMut(u64) + Send + 'static) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
+    use tokio::io::AsyncReadExt;
+    futures_util::stream::unfold(f, |mut f| async move {
+        let mut buf = vec![0u8; 1 << 20];
+        match f.read(&mut buf).await {
+            Ok(0) => None,
+            Ok(n) => { buf.truncate(n); Some((Ok(bytes::Bytes::from(buf)), f)) }
+            Err(e) => Some((Err(e), f)),
+        }
+    }).inspect(move |r| { if let Ok(b) = r { tell(b.len() as u64); } })
+}
+
+async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &AtomicBool) -> Result<(), String> {
+    let navn = std::path::Path::new(&fil.sti).file_name().and_then(|n| n.to_str()).unwrap_or("fil").to_string();
+    let mime = mime_fra(&navn);
+    let meta = tokio::fs::metadata(&fil.sti).await.map_err(|e| format!("{e}"))?;
+    let bytes = meta.len();
+    let sist = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
+    // 1) presign
+    let r = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "presign", "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) })).send().await.map_err(|e| format!("{e}"))?;
+    let st = r.status().as_u16();
+    if st == 401 || st == 403 { return Err("Ikke tilgang — logg inn på nytt (API-nøkler kan ikke laste opp)".into()); }
+    let d: serde_json::Value = r.json().await.map_err(|e| format!("{e}"))?;
+    if d["kvoteSperre"].as_bool().unwrap_or(false) { return Err(d["error"].as_str().unwrap_or("Lagringen er full").to_string()); }
+    let (url, key) = match (d["uploadUrl"].as_str(), d["originalKey"].as_str()) { (Some(u), Some(k)) => (u.to_string(), k.to_string()), _ => return Err(d["error"].as_str().unwrap_or("presign feilet").to_string()) };
+    // 2) PUT rett til R2 m/ framdrift
+    let f = tokio::fs::File::open(&fil.sti).await.map_err(|e| format!("{e}"))?;
+    let id = fil.sti.clone(); let app2 = app.clone();
+    let sendt = Arc::new(AtomicU64::new(0)); let sendt2 = sendt.clone();
+    let mut sist_meldt = std::time::Instant::now();
+    let strom = fil_strom(f, move |n| {
+        let t = sendt2.fetch_add(n, Ordering::Relaxed) + n;
+        if sist_meldt.elapsed().as_millis() > 150 || t == bytes { sist_meldt = std::time::Instant::now(); let _ = app2.emit("framdrift", Framdrift { id: id.clone(), hentet: t, total: bytes, status: "laster".into(), feil: None }); }
+    });
+    let resp = bare.put(&url).header(reqwest::header::CONTENT_TYPE, mime).header(reqwest::header::CONTENT_LENGTH, bytes).body(reqwest::Body::wrap_stream(strom)).send().await.map_err(|e| format!("{e}"))?;
+    if !resp.status().is_success() { return Err(format!("Lageret svarte {}", resp.status())); }
+    if avbryt.load(Ordering::Relaxed) {
+        let _ = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "avbryt", "originalKeys": [key] })).send().await;
+        return Err("Avbrutt".into());
+    }
+    // 3) fullfør (server: thumb/EXIF/dedup for bilder)
+    let r = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "fullfor", "originalKey": key, "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) })).send().await.map_err(|e| format!("{e}"))?;
+    let st = r.status().as_u16();
+    let d: serde_json::Value = r.json().await.unwrap_or(serde_json::json!({}));
+    if !(200..300).contains(&st) { return Err(format!("fullfør: {}", d["error"].as_str().unwrap_or("feilet"))); }
+    let status = if d["allerede"].as_bool().unwrap_or(false) { "hoppet" } else { "ferdig" };
+    let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: bytes, total: bytes, status: status.into(), feil: None });
+    Ok(())
+}
+
+#[tauri::command]
+async fn last_opp(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String, nokkel: String, filer: Vec<OppFil>, mappe_id: String, parallell: usize) -> Result<serde_json::Value, String> {
+    tilstand.avbryt.store(false, Ordering::Relaxed);
+    let portal = portal.trim_end_matches('/').to_string();
+    let k = klient(&nokkel)?;
+    let bare = reqwest::Client::builder().build().map_err(|e| format!("{e}"))?;
+    let cache = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<String, String>::new()));
+    let sem = Arc::new(Semaphore::new(parallell.clamp(1, 6)));
+    let avbryt = tilstand.avbryt.clone();
+    let mut jobber = Vec::new();
+    for fil in filer {
+        let (app, k, bare, portal, cache, sem, avbryt, mappe_id) = (app.clone(), k.clone(), bare.clone(), portal.clone(), cache.clone(), sem.clone(), avbryt.clone(), mappe_id.clone());
+        jobber.push(tokio::spawn(async move {
+            let _p = sem.acquire().await;
+            if avbryt.load(Ordering::Relaxed) { return (fil.sti.clone(), Err::<(), String>("Avbrutt".into())); }
+            let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: 0, total: fil.bytes, status: "laster".into(), feil: None });
+            let rel_dir = std::path::Path::new(&fil.relativ).parent().map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+            let res = match sikre_mappe(&k, &portal, &mappe_id, &rel_dir, &cache).await {
+                Ok(mid) => { let mut r = Err(String::new()); for _ in 0..2 { r = last_opp_en(&app, &k, &bare, &portal, &fil, &mid, &avbryt).await; if r.is_ok() || avbryt.load(Ordering::Relaxed) { break; } } r }
+                Err(e) => Err(e),
+            };
+            if let Err(e) = &res { let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: 0, total: fil.bytes, status: "feil".into(), feil: Some(e.clone()) }); }
+            (fil.sti.clone(), res)
+        }));
+    }
+    let mut ok = 0usize; let mut feil = Vec::new();
+    for j in jobber { match j.await { Ok((_, Ok(()))) => ok += 1, Ok((id, Err(e))) => feil.push(serde_json::json!({ "id": id, "feil": e })), Err(e) => feil.push(serde_json::json!({ "feil": format!("{e}") })) } }
+    Ok(serde_json::json!({ "ok": ok, "feil": feil }))
+}
+
+/// Lokale filer under en mappe (rekursivt) → [{sti, relativ, bytes}].
+#[tauri::command]
+async fn les_mappe(sti: String) -> Result<Vec<OppFil>, String> {
+    let rot = PathBuf::from(&sti);
+    let mut ut = Vec::new(); let mut stakk = vec![rot.clone()];
+    while let Some(d) = stakk.pop() {
+        let mut rd = tokio::fs::read_dir(&d).await.map_err(|e| format!("{e}"))?;
+        while let Some(e) = rd.next_entry().await.map_err(|e| format!("{e}"))? {
+            let p = e.path(); let navn = e.file_name().to_string_lossy().to_string();
+            if navn.starts_with('.') || navn.ends_with(".part") || navn.ends_with(".log") { continue; }
+            let m = e.metadata().await.map_err(|e| format!("{e}"))?;
+            if m.is_dir() { stakk.push(p); } else { ut.push(OppFil { relativ: p.strip_prefix(&rot).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or(navn), sti: p.to_string_lossy().to_string(), bytes: m.len() }); }
+        }
+    }
+    ut.sort_by(|a, b| a.relativ.cmp(&b.relativ));
+    Ok(ut)
+}
+
 #[tauri::command]
 fn avbryt(tilstand: State<'_, Tilstand>) {
     tilstand.avbryt.store(true, Ordering::Relaxed);
@@ -272,7 +403,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(Tilstand::default())
-        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, last_opp, les_mappe, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
