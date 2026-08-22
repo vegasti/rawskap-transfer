@@ -58,9 +58,9 @@
   <!-- Steg 1: kobling -->
   <section id="steg-kobling" class="kort">
     <h2>Koble til skapet</h2>
-    <p>Lag en app-nøkkel i portalen (logget inn → <a href="#" id="apne-portal">portal.rawstudios.no/rawskap/app</a>), lim den inn her. Nøkkelen gjelder i 180 dager og ligger bare på denne maskinen.</p>
-    <label>Portal</label>
-    <input type="text" id="portal" value="https://portal.rawstudios.no" />
+    <p>Lag en app-nøkkel i portalen (logget inn → <a href="#" id="apne-portal">rawskap.no/app</a>), lim den inn her. Nøkkelen gjelder i 180 dager og ligger bare på denne maskinen.</p>
+    <label>Rawskap-adresse</label>
+    <input type="text" id="portal" value="https://rawskap.no" />
     <label>App-nøkkel</label>
     <input type="password" id="nokkel" placeholder="lim inn nøkkelen …" />
     <div class="rad" style="margin-top:12px">
@@ -116,7 +116,7 @@
   const lagret = await store.get('kobling');
   if (lagret?.nokkel) { $('portal').value = lagret.portal; $('nokkel').value = lagret.nokkel; }
   if (await store.get('maal')) { maal = await store.get('maal'); $('maal').value = maal; }
-  $('apne-portal').onclick = e => { e.preventDefault(); openShell(($('portal').value || 'https://portal.rawstudios.no').replace(/\/$/, '') + '/rawskap/app'); };
+  $('apne-portal').onclick = e => { e.preventDefault(); openShell(($('portal').value || 'https://rawskap.no').replace(/\/$/, '') + (/rawskap\.no/.test($('portal').value) ? '/app' : '/rawskap/app')); };
   $('koble').onclick = async () => {
     portal = $('portal').value.trim().replace(/\/$/, ''); nokkel = $('nokkel').value.trim();
     $('kobling-feil').textContent = ''; $('koble').disabled = true; $('koble').textContent = 'Kobler …';
