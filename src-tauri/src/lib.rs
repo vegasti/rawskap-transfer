@@ -391,6 +391,17 @@ async fn les_mappe(sti: String) -> Result<Vec<OppFil>, String> {
     Ok(ut)
 }
 
+/// Ny mappe i skapet (høyreklikk / verktøylinja).
+#[tauri::command]
+async fn ny_mappe(portal: String, nokkel: String, navn: String, forelder: String) -> Result<serde_json::Value, String> {
+    let k = klient(&nokkel)?;
+    let r = k.post(format!("{}/api/rawskap/mapper", portal.trim_end_matches('/'))).json(&serde_json::json!({ "navn": navn, "forelderId": mappe_json(&forelder) })).send().await.map_err(|e| format!("{e}"))?;
+    if r.status() == 401 || r.status() == 403 { return Err("Ikke tilgang — logg inn på nytt".into()); }
+    let d: serde_json::Value = r.json().await.map_err(|e| format!("{e}"))?;
+    if d["id"].as_str().is_none() { return Err(d["error"].as_str().unwrap_or("Kunne ikke lage mappe").to_string()); }
+    Ok(d)
+}
+
 #[tauri::command]
 fn avbryt(tilstand: State<'_, Tilstand>) {
     tilstand.avbryt.store(true, Ordering::Relaxed);
@@ -403,7 +414,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(Tilstand::default())
-        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, last_opp, les_mappe, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, last_opp, les_mappe, ny_mappe, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
