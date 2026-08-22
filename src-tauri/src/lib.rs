@@ -25,6 +25,8 @@ pub struct Fil {
     pub sti: String,
     #[serde(default)]
     pub xxh64: String,
+    #[serde(default)]
+    pub url: String, // deling: nedlastings-URL m/ token (302 → R2), uten innlogging
 }
 
 #[derive(Clone, Serialize)]
@@ -117,6 +119,8 @@ async fn hent_liste(portal: String, nokkel: String, mappe: String) -> Result<ser
     r.json::<serde_json::Value>().await.map_err(|e| format!("{e}"))
 }
 
+fn bare_uten_redirect() -> reqwest::Client { reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap_or_default() }
+
 fn trygt_navn(s: &str) -> String {
     s.chars().map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c }).collect()
 }
@@ -158,8 +162,8 @@ async fn last_ned_en(
     let hentet = Arc::new(AtomicU64::new(allerede));
 
     // 1) portalen → 302 (signert R2-URL). Cookien følger KUN hit.
-    let url = format!("{}/api/rawskap/original/{}?last=1", portal.trim_end_matches('/'), fil.id);
-    let r = k.get(&url).send().await.map_err(|e| format!("{e}"))?;
+    let url = if fil.url.is_empty() { format!("{}/api/rawskap/original/{}?last=1", portal.trim_end_matches('/'), fil.id) } else { fil.url.clone() };
+    let r = if fil.url.is_empty() { k.get(&url) } else { bare_uten_redirect().get(&url) }.send().await.map_err(|e| format!("{e}"))?;
     let r2 = match r.status().as_u16() {
         301 | 302 | 303 | 307 | 308 => r
             .headers()
@@ -731,6 +735,17 @@ async fn synk_merk(st: State<'_, SynkTilstand>, id: String, filer: Vec<OppFil>, 
     Ok(())
 }
 
+/// Deling → fil-liste (token = auth). Brukes av rawskap://deling/<token>.
+#[tauri::command]
+async fn hent_deling(portal: String, token: String) -> Result<serde_json::Value, String> {
+    let k = reqwest::Client::new();
+    let r = k.get(format!("{}/api/bildebank/samling/transfer-liste?token={}", portal.trim_end_matches('/'), token)).send().await.map_err(|e| format!("{e}"))?;
+    let st = r.status().as_u16();
+    let d: serde_json::Value = r.json().await.map_err(|e| format!("{e}"))?;
+    if !(200..300).contains(&st) { return Err(d["error"].as_str().unwrap_or("Kunne ikke hente delingen").to_string()); }
+    Ok(d)
+}
+
 #[tauri::command]
 fn avbryt(tilstand: State<'_, Tilstand>) {
     tilstand.avbryt.store(true, Ordering::Relaxed);
@@ -753,8 +768,13 @@ pub fn run() {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| { vis_vindu(app); }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--skjult"])))
         .setup(|app| {
+            // rawskap:// — i dev er ikke skjemaet registrert av en installer; gjør det her.
+            #[cfg(any(windows, target_os = "linux"))]
+            { use tauri_plugin_deep_link::DeepLinkExt; let _ = app.deep_link().register_all(); }
             // Systemkurv: venstreklikk = vis, meny = Åpne / Avslutt.
             let apne = MenuItem::with_id(app, "apne", "Åpne Rawskap Transfer", true, None::<&str>)?;
             let avslutt = MenuItem::with_id(app, "avslutt", "Avslutt", true, None::<&str>)?;
@@ -779,7 +799,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
-        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![hent_liste, hent_deling, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }

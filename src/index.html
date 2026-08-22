@@ -511,7 +511,7 @@
     startJobbNaa(navn, filer, mappeId, erMappe, type);
   }
   function startJobbNaa(navn, filer, mappeId, erMappe, type, ekstra = {}) {
-    const j = { id: 'j' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type, navn, mappeId, filer: type === 'opp' ? filer : filer.map(f => ({ id: f.id, filnavn: f.filnavn, bytes: f.bytes, sti: f.sti || '', xxh64: f.xxh64 || '' })), maal: erMappe && mappeId ? `${maal}/${navn.replace(/[\\/:*?"<>|]+/g, '_')}` : maal, status: 'kø', ok: 0, feil: [], logg: !!P.logg, konflikt: P.konflikt, ...ekstra };
+    const j = { id: 'j' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type, navn, mappeId, filer: type === 'opp' ? filer : filer.map(f => ({ id: f.id, filnavn: f.filnavn, bytes: f.bytes, sti: f.sti || '', xxh64: f.xxh64 || '', url: f.url || '' })), maal: erMappe && (mappeId || filer.some(f => f.url)) ? `${maal}/${navn.replace(/[\\/:*?"<>|]+/g, '_')}` : maal, status: 'kø', ok: 0, feil: [], logg: !!P.logg, konflikt: P.konflikt, ...ekstra };
     jobber.unshift(j); tegnJobber(); lagreKo(); kjørNeste();
   }
   async function kjørNeste() {
@@ -590,6 +590,29 @@
     }
     oppdaterLinje();
   }
+  // ── rawskap://deling/<token> (23/8): fra delingens nedlastingsdialog. Hele
+  // delingen som én jobb, filer via token-URL (ingen innlogging nødvendig).
+  async function taImotLenke(url) {
+    try {
+      const m = String(url).match(/^rawskap:\/\/deling\/([A-Za-z0-9_-]+)/); if (!m) return;
+      vis_vindu_js();
+      const p = ($('portal').value || 'https://rawskap.no').trim().replace(/\/$/, '');
+      const d = await invoke('hent_deling', { portal: p, token: m[1] });
+      const filer = (d.filer || []).map(f => ({ id: f.id, filnavn: f.filnavn, bytes: f.bytes, sti: f.sti || '', xxh64: f.xxh64 || '', url: f.url }));
+      if (!filer.length) { $('overf-tekst').textContent = t.ingenOverf; return; }
+      if (!portal) portal = p; // ikke innlogget: nedlasting trenger ikke nøkkel
+      $('skall').classList.remove('skjult'); $('overf').classList.remove('skjult'); $('steg-kobling').classList.add('skjult');
+      visOverfVisning(true);
+      startJobb(d.navn || 'Deling', filer, '', true, 'ned');
+    } catch (e) { $('overf-tekst').textContent = String(e.message || e); $('overf').classList.remove('skjult'); }
+  }
+  function vis_vindu_js() { try { const w = window.__TAURI__.window.getCurrentWindow(); w.show(); w.unminimize(); w.setFocus(); } catch { /* */ } }
+  try {
+    const dl = window.__TAURI__.deepLink;
+    await dl.onOpenUrl(urls => { for (const u of urls || []) taImotLenke(u); });
+    const start = await dl.getCurrent().catch(() => null); if (start?.length) for (const u of start) taImotLenke(u);
+  } catch { /* uten deep-link-plugin */ }
+
   // Auto-kobling SIST (22/8-lærepenge ×2): alt over må være definert før kobleMed tegner skapet.
   if (lagret?.nokkel) { try { await kobleMed(lagret.portal, lagret.nokkel); } catch (e) { $('kobling-status').textContent = t.forrige; } }
 </script>

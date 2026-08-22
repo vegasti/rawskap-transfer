@@ -41,5 +41,14 @@
     "externalBin": [
       "binaries/ffmpeg"
     ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "rawskap"
+        ]
+      }
+    }
   }
 }
