@@ -39,8 +39,13 @@ pub struct Tilstand {
 
 fn klient(nokkel: &str) -> Result<reqwest::Client, String> {
     let mut h = reqwest::header::HeaderMap::new();
-    let cookie = format!("kunde_sesjon={}", nokkel);
-    h.insert(reqwest::header::COOKIE, cookie.parse().map_err(|e| format!("{e}"))?);
+    // API-nøkkel (rsk_live_…) = Bearer; app-nøkkel (signert sesjon) = cookie.
+    if nokkel.starts_with("rsk_live_") {
+        h.insert(reqwest::header::AUTHORIZATION, format!("Bearer {}", nokkel).parse().map_err(|e| format!("{e}"))?);
+    } else {
+        let cookie = format!("kunde_sesjon={}", nokkel);
+        h.insert(reqwest::header::COOKIE, cookie.parse().map_err(|e| format!("{e}"))?);
+    }
     h.insert(reqwest::header::USER_AGENT, "RawskapTransfer/0.1".parse().unwrap());
     reqwest::Client::builder()
         .default_headers(h)
