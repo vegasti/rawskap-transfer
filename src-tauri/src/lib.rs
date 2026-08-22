@@ -730,16 +730,50 @@ fn avbryt(tilstand: State<'_, Tilstand>) {
     tilstand.avbryt.store(true, Ordering::Relaxed);
 }
 
+/// Lukk-til-systemkurv (22/8): når valget er på, skjules vinduet i stedet for å
+/// avslutte — synk-mapper og kø lever videre. «Avslutt» i kurv-menyen avslutter.
+static TIL_KURV: AtomicBool = AtomicBool::new(false);
+#[tauri::command]
+fn sett_til_kurv(paa: bool) { TIL_KURV.store(paa, Ordering::Relaxed); }
+
+fn vis_vindu(app: &AppHandle) {
+    use tauri::Manager;
+    if let Some(w) = app.get_webview_window("main") { let _ = w.show(); let _ = w.unminimize(); let _ = w.set_focus(); }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    use tauri::Manager;
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState};
     tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--skjult"])))
+        .setup(|app| {
+            // Systemkurv: venstreklikk = vis, meny = Åpne / Avslutt.
+            let apne = MenuItem::with_id(app, "apne", "Åpne Rawskap Transfer", true, None::<&str>)?;
+            let avslutt = MenuItem::with_id(app, "avslutt", "Avslutt", true, None::<&str>)?;
+            let meny = Menu::with_items(app, &[&apne, &avslutt])?;
+            let mut tb = TrayIconBuilder::new().menu(&meny).show_menu_on_left_click(false).tooltip("Rawskap Transfer");
+            if let Some(ikon) = app.default_window_icon().cloned() { tb = tb.icon(ikon); }
+            tb.on_menu_event(|app, ev| match ev.id.as_ref() { "apne" => vis_vindu(app), "avslutt" => app.exit(0), _ => {} })
+              .on_tray_icon_event(|tray, ev| { if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev { vis_vindu(tray.app_handle()); } })
+              .build(app)?;
+            // Startet av autostart («--skjult»): ligg i kurven til noen åpner.
+            if std::env::args().any(|a| a == "--skjult") { if let Some(w) = app.get_webview_window("main") { let _ = w.hide(); } }
+            Ok(())
+        })
+        .on_window_event(|w, ev| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = ev {
+                if TIL_KURV.load(Ordering::Relaxed) { api.prevent_close(); let _ = w.hide(); }
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_notification::init())
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
-        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }

@@ -10,6 +10,11 @@
     "dialog:default",
     "shell:allow-open",
     "store:default",
-    "notification:default"
+    "notification:default",
+    "autostart:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:window:allow-unminimize"
   ]
 }
