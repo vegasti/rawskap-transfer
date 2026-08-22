@@ -641,6 +641,90 @@ async fn slett_filer(portal: String, nokkel: String, ids: Vec<String>) -> Result
 #[tauri::command]
 async fn er_mappe(sti: String) -> bool { tokio::fs::metadata(&sti).await.map(|m| m.is_dir()).unwrap_or(false) }
 
+// ── SYNK-MAPPER (22/8): en lokal mappe speiles til en mappe i skapet.
+// Polling hvert 20. s (virker på NAS/nettverksdisk der fil-hendelser er
+// upålitelige). En fil er «ferdig skrevet» når størrelse+mtime er uendret
+// mellom to skann. Ferdige (sti|bytes|mtime) huskes per synk i en JSON i
+// datamappa, så ingenting lastes opp dobbelt — heller ikke etter omstart.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct Synk { pub id: String, pub lokal: String, pub mappe_id: String, pub navn: String, pub aktiv: bool }
+
+#[derive(Default)]
+pub struct SynkTilstand {
+    lopere: tokio::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>,
+    meldt: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>, // stier som ligger i kø/jobb nå
+}
+
+fn synk_ferdig_sti(id: &str) -> PathBuf { resume_dir().join(format!("synk-{}.json", trygt_navn(id))) }
+fn synk_ferdig_les(id: &str) -> std::collections::HashSet<String> { std::fs::read(synk_ferdig_sti(id)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default() }
+fn synk_ferdig_skriv(id: &str, sett: &std::collections::HashSet<String>) { if let Ok(b) = serde_json::to_vec(sett) { let _ = std::fs::write(synk_ferdig_sti(id), b); } }
+fn nokkel(f: &OppFil, mtime: u64) -> String { format!("{}|{}|{}", f.sti, f.bytes, mtime) }
+
+async fn skann(sti: &str) -> Vec<(OppFil, u64)> {
+    let mut ut = Vec::new();
+    if let Ok(liste) = les_mappe(sti.to_string()).await {
+        for f in liste {
+            let mt = tokio::fs::metadata(&f.sti).await.ok().and_then(|m| m.modified().ok()).and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+            ut.push((f, mt));
+        }
+    }
+    ut
+}
+
+#[derive(Clone, Serialize)]
+struct SynkFunn { id: String, mappe_id: String, navn: String, filer: Vec<OppFil> }
+
+async fn synk_loper(app: AppHandle, synk: Synk, meldt: Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>) {
+    let mut forrige: std::collections::HashMap<String, (u64, u64)> = std::collections::HashMap::new();
+    loop {
+        let ferdige = synk_ferdig_les(&synk.id);
+        let naa = skann(&synk.lokal).await;
+        let mut nye = Vec::new();
+        let mut denne = std::collections::HashMap::new();
+        for (f, mt) in &naa {
+            denne.insert(f.sti.clone(), (f.bytes, *mt));
+            if ferdige.contains(&nokkel(f, *mt)) { continue; }
+            if f.bytes == 0 { continue; }
+            // Stabil = samme størrelse og mtime som forrige skann, og mtime minst 10 s gammel.
+            let stabil = forrige.get(&f.sti).map(|(b, m)| *b == f.bytes && *m == *mt).unwrap_or(false)
+                && std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).saturating_sub(*mt) >= 10;
+            if !stabil { continue; }
+            let mut m = meldt.lock().await;
+            if m.contains(&f.sti) { continue; }
+            m.insert(f.sti.clone());
+            nye.push(f.clone());
+        }
+        forrige = denne;
+        if !nye.is_empty() { let _ = app.emit("synk-funn", SynkFunn { id: synk.id.clone(), mappe_id: synk.mappe_id.clone(), navn: synk.navn.clone(), filer: nye }); }
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+    }
+}
+
+/// Sett hele lista av synk-mapper (erstatter): stopper gamle løpere, starter aktive.
+#[tauri::command]
+async fn synk_sett(app: AppHandle, st: State<'_, SynkTilstand>, liste: Vec<Synk>) -> Result<(), String> {
+    let mut l = st.lopere.lock().await;
+    for (_, h) in l.drain() { h.abort(); }
+    for synk in liste.into_iter().filter(|s| s.aktiv && !s.lokal.is_empty()) {
+        let id = synk.id.clone();
+        l.insert(id, tokio::spawn(synk_loper(app.clone(), synk, st.meldt.clone())));
+    }
+    Ok(())
+}
+
+/// Jobben for disse filene er ferdig (ok) eller feilet — oppdater minnet.
+#[tauri::command]
+async fn synk_merk(st: State<'_, SynkTilstand>, id: String, filer: Vec<OppFil>, ok: bool) -> Result<(), String> {
+    let mut m = st.meldt.lock().await;
+    let mut ferdige = synk_ferdig_les(&id);
+    for f in &filer {
+        m.remove(&f.sti);
+        if ok { let mt = tokio::fs::metadata(&f.sti).await.ok().and_then(|x| x.modified().ok()).and_then(|x| x.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0); ferdige.insert(nokkel(f, mt)); }
+    }
+    synk_ferdig_skriv(&id, &ferdige);
+    Ok(())
+}
+
 #[tauri::command]
 fn avbryt(tilstand: State<'_, Tilstand>) {
     tilstand.avbryt.store(true, Ordering::Relaxed);
@@ -654,7 +738,8 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_notification::init())
         .manage(Tilstand::default())
-        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, slett_filer, sett_nettverk, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .manage(SynkTilstand::default())
+        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }

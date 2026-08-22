@@ -113,6 +113,9 @@
   .innst-rad .tekst { font-size:13.5px; } .innst-rad .hint { font-size:12px; color:var(--svak); margin-top:2px; }
   .innst-rad select, .innst-rad input[type=number] { padding:6px 9px; border:1px solid var(--kant); border-radius:7px; background:var(--kort); color:inherit; font:inherit; }
   .innst-rad input[type=number] { width:90px; text-align:right; }
+  .synk-rad { display:grid; grid-template-columns:1fr auto auto auto; gap:10px; align-items:center; padding:10px 0; border-bottom:1px solid var(--kant); }
+  .synk-rad .lokal { font-family:ui-monospace,monospace; font-size:12px; color:var(--svak); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .synk-rad .pil { color:var(--svakere); }
   .sti { display:flex; gap:8px; align-items:center; margin-top:4px; } .sti span { flex:1; font-family:ui-monospace,monospace; font-size:12px; color:var(--svak); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .kobling { max-width:560px; margin:60px auto; background:var(--kort); border:1px solid var(--kant); border-radius:12px; padding:22px 24px; }
   .kobling h2 { font-family:Georgia,serif; font-size:20px; margin:0 0 6px; }
@@ -187,7 +190,7 @@
   </div>
   <div class="hoved innst-visning" id="visning-innst">
     <div class="verktøy"><h2 data-t="innstillinger">Innstillinger</h2></div>
-    <div class="faner"><button class="på" data-side="generelt" data-t="fGenerelt">Generelt</button><button data-side="nett" data-t="fNett">Nettverk</button><button data-side="varsler" data-t="fVarsler">Varsler</button></div>
+    <div class="faner"><button class="på" data-side="generelt" data-t="fGenerelt">Generelt</button><button data-side="nett" data-t="fNett">Nettverk</button><button data-side="varsler" data-t="fVarsler">Varsler</button><button data-side="synk" data-t="fSynk">Synk-mapper</button></div>
     <div class="innst-side på" id="side-generelt">
       <h3 data-t="nedMappe">Nedlastingsmappe</h3>
       <div class="innst-rad uten-strek"><div><div class="tekst" data-t="alltidTil">Last alltid ned til …</div><div class="hint" data-t="alltidTilHint">Av = appen spør hvor hver jobb skal før den starter.</div></div><input type="checkbox" id="p-fastmaal" /></div>
@@ -202,6 +205,12 @@
       <h3 data-t="baandbredde">Båndbredde</h3>
       <div class="innst-rad"><div><div class="tekst" data-t="strupNed">Strup nedlasting</div><div class="hint" data-t="strupHint">Mb/s — 0 = ubegrenset. Greit når du vil jobbe ved siden av.</div></div><input type="number" id="p-ned" min="0" step="10" /></div>
       <div class="innst-rad"><div class="tekst" data-t="strupOpp">Strup opplasting</div><input type="number" id="p-opp" min="0" step="10" /></div>
+    </div>
+    <div class="innst-side" id="side-synk">
+      <h3 data-t="synkTittel">Mapper som lastes opp automatisk</h3>
+      <p class="hint" style="margin:0 0 10px" data-t="synkHint">Alt som havner i en lokal mappe (f.eks. Lightroom-eksporten) lastes opp til den koblede mappa i skapet — når appen kjører. Filer som er lastet opp huskes, så ingenting går dobbelt.</p>
+      <div id="synk-liste"></div>
+      <button class="btn" id="synk-ny" style="margin-top:10px" data-t="synkNy">+ Legg til synk-mappe</button>
     </div>
     <div class="innst-side" id="side-varsler">
       <h3 data-t="varslerNaar">Varsle på skrivebordet når …</h3>
@@ -229,9 +238,9 @@
   const { open: openShell } = window.__TAURI__.shell;
   const { load } = window.__TAURI__.store;
 
-  const EN = { koble: 'Connect to your library', kobleTekst: 'Sign in in the browser — as you usually do (e-mail, Google or Microsoft) — and press “Connect” there. The app connects by itself. Nothing to copy.', loggInn: 'Sign in in the browser', avansert: 'Advanced: other address or key', adresse: 'Rawskap address', nokkel: 'Key (app key or API key)', kobleNokkel: 'Connect with key', til: 'Download to', lastNedMappe: '⤓ Download folder', lastetOpp: 'Uploaded', hasher: 'checksum …', verifisert: 'verified', gjenopptatt: 'Jobs from last time were restored — press “Try again” on the ones you want to continue.', fantesFraFor: 'already in the library', lagerPreview: 'creating preview …', kopierNavn: 'Copy file name', iUndermapper: 'in subfolders', nyMappe: '+ New folder', nyMappeTittel: 'New folder', nyMappeTekst: 'Created inside', mappenavn: 'Folder name …', avbrytKnapp: 'Cancel', her: 'here', oppTilMappe: 'Uploads go to', lastOppHit: '⤒ Upload files here', lastOppMappeHit: '⤒ Upload folder here', lastNedDenne: '⤓ Download this folder', apneMappe: 'Open', iRawskap: 'Open in Rawskap', lastOpp: '⤒ Upload', lastOppFiler: 'Pick files …', lastOppMappe: 'Pick a folder …', droppHint: 'Tip: drag files or folders straight into the list.', oppTil: 'to', opplasting: 'upload', videoUtenPoster: 'Videos get no poster image in this version — the card shows a file icon until the library processes it.', overforinger: 'Transfers', ingenOverf: 'No transfers', innstillinger: 'Preferences', fGenerelt: 'General', fNett: 'Network', fVarsler: 'Notifications', nedMappe: 'Download destination', alltidTil: 'Always download to …', alltidTilHint: 'Off = the app asks where each job should go before it starts.', endre: 'Change …', konflikt: 'When a file already exists', konfliktTekst: 'On download …', kHopp: 'Skip (resume where it stopped)', oppKonfliktTekst: 'On upload …', oppKonfliktHint: 'Applies to files with the same name in the same library folder. Identical files (name + size) are always skipped.', oKBegge: 'Keep both', oKHopp: 'Skip', oKErstatt: 'Replace (old one to trash)', hoppetNavn: 'skipped — same name exists', kBegge: 'Keep both', kOverskriv: 'Overwrite', loggfil: 'Log file', loggTekst: 'Write a log per job', loggHint: 'Saved in the download folder: start/finish per file and a summary.', baandbredde: 'Bandwidth', strupNed: 'Throttle download', strupHint: 'Mb/s — 0 = unlimited. Handy when you want to work alongside.', strupOpp: 'Throttle upload', varslerNaar: 'Notify me on desktop when …', vFeil: 'a transfer fails', vFerdig: 'a transfer completes', varselFerdig: 'Transfer complete', varselFeil: 'Transfer failed', ryddFerdige: 'Clear finished', kolFiler: 'Files', kolStatus: 'Status', visOverf: 'Show transfers', loggUt: 'Sign out', skrivLogg: 'Write log',
+  const EN = { koble: 'Connect to your library', kobleTekst: 'Sign in in the browser — as you usually do (e-mail, Google or Microsoft) — and press “Connect” there. The app connects by itself. Nothing to copy.', loggInn: 'Sign in in the browser', avansert: 'Advanced: other address or key', adresse: 'Rawskap address', nokkel: 'Key (app key or API key)', kobleNokkel: 'Connect with key', til: 'Download to', lastNedMappe: '⤓ Download folder', lastetOpp: 'Uploaded', hasher: 'checksum …', verifisert: 'verified', gjenopptatt: 'Jobs from last time were restored — press “Try again” on the ones you want to continue.', fantesFraFor: 'already in the library', lagerPreview: 'creating preview …', kopierNavn: 'Copy file name', iUndermapper: 'in subfolders', nyMappe: '+ New folder', nyMappeTittel: 'New folder', nyMappeTekst: 'Created inside', mappenavn: 'Folder name …', avbrytKnapp: 'Cancel', her: 'here', oppTilMappe: 'Uploads go to', lastOppHit: '⤒ Upload files here', lastOppMappeHit: '⤒ Upload folder here', lastNedDenne: '⤓ Download this folder', apneMappe: 'Open', iRawskap: 'Open in Rawskap', lastOpp: '⤒ Upload', lastOppFiler: 'Pick files …', lastOppMappe: 'Pick a folder …', droppHint: 'Tip: drag files or folders straight into the list.', oppTil: 'to', opplasting: 'upload', videoUtenPoster: 'Videos get no poster image in this version — the card shows a file icon until the library processes it.', overforinger: 'Transfers', ingenOverf: 'No transfers', innstillinger: 'Preferences', fGenerelt: 'General', fNett: 'Network', fVarsler: 'Notifications', fSynk: 'Sync folders', synkTittel: 'Folders uploaded automatically', synkHint: 'Anything that lands in a local folder (e.g. your Lightroom export) is uploaded to the linked library folder — while the app is running. Uploaded files are remembered, so nothing goes twice.', synkNy: '+ Add sync folder', synkVelgLokal: 'Pick the local folder to watch', synkVelgSkap: 'Which library folder should it go to?', synkPause: 'Pause', synkFortsett: 'Resume', synkFjern: 'Remove', synkJobb: 'Sync', synkIngen: 'No sync folders yet.', nedMappe: 'Download destination', alltidTil: 'Always download to …', alltidTilHint: 'Off = the app asks where each job should go before it starts.', endre: 'Change …', konflikt: 'When a file already exists', konfliktTekst: 'On download …', kHopp: 'Skip (resume where it stopped)', oppKonfliktTekst: 'On upload …', oppKonfliktHint: 'Applies to files with the same name in the same library folder. Identical files (name + size) are always skipped.', oKBegge: 'Keep both', oKHopp: 'Skip', oKErstatt: 'Replace (old one to trash)', hoppetNavn: 'skipped — same name exists', kBegge: 'Keep both', kOverskriv: 'Overwrite', loggfil: 'Log file', loggTekst: 'Write a log per job', loggHint: 'Saved in the download folder: start/finish per file and a summary.', baandbredde: 'Bandwidth', strupNed: 'Throttle download', strupHint: 'Mb/s — 0 = unlimited. Handy when you want to work alongside.', strupOpp: 'Throttle upload', varslerNaar: 'Notify me on desktop when …', vFeil: 'a transfer fails', vFerdig: 'a transfer completes', varselFerdig: 'Transfer complete', varselFeil: 'Transfer failed', ryddFerdige: 'Clear finished', kolFiler: 'Files', kolStatus: 'Status', visOverf: 'Show transfers', loggUt: 'Sign out', skrivLogg: 'Write log',
     lager: 'Creating code …', bekreft: 'Confirm the code in the browser …', koblet: 'Connected ✓', utlop: 'The code expired — try again.', forLang: 'Took too long — try again.', forrige: 'The previous connection no longer works — sign in again.', velgMaal: 'Download to', hele: 'Whole library', mapper: 'folders', filer: 'files', fil: 'file', tomMappe: 'No files in this folder.', navn: 'Name', storrelse: 'Size', hent: 'Download', venter: 'waiting', laDer: 'was there', ferdig: 'done', feilet: 'failed', avbrutt: 'cancelled', iKo: 'queued', avbryt: 'Cancel', apneRawskap: 'Open in Rawskap', visUtforsker: 'Show in File Explorer', visLogg: 'Show log', fjern: 'Remove from list', provIgjen: 'Try again', velgMaalForst: 'Pick a download folder first' };
-  const NO = { til: 'Last ned til', hoppetNavn: 'hoppet over — samme navn finnes', hasher: 'sjekksum …', verifisert: 'verifisert', gjenopptatt: 'Jobber fra forrige gang er hentet inn — trykk «Prøv igjen» på dem du vil fortsette.', fantesFraFor: 'fantes i skapet fra før', lagerPreview: 'lager forhåndsvisning …', lastetOpp: 'Lastet opp', kopierNavn: 'Kopier filnavn', varselFerdig: 'Overføring ferdig', varselFeil: 'Overføring feilet', ryddFerdige: 'Fjern ferdige', kolFiler: 'Filer', kolStatus: 'Status', visOverf: 'Vis overføringer', avbrytKnapp: 'Avbryt', lastOppFiler: 'Velg filer …', lastOppMappe: 'Velg en mappe …', droppHint: 'Tips: dra filer eller mapper rett inn i lista.', iUndermapper: 'i undermapper', nyMappe: '+ Ny mappe', nyMappeTittel: 'Ny mappe', nyMappeTekst: 'Lages i', mappenavn: 'Mappenavn …', her: 'hit', oppTilMappe: 'Lastes opp til', lastOppHit: '⤒ Last opp filer hit', lastOppMappeHit: '⤒ Last opp mappe hit', lastNedDenne: '⤓ Last ned denne mappa', apneMappe: 'Åpne', iRawskap: 'Åpne i Rawskap', oppTil: 'til', opplasting: 'opplasting', videoUtenPoster: 'Video får ikke plakatbilde i denne versjonen — kortet viser filikon til skapet har behandlet den.', lager: 'Lager kode …', bekreft: 'Bekreft koden i nettleseren …', koblet: 'Koblet ✓', utlop: 'Koden utløp — prøv igjen.', forLang: 'Tok for lang tid — prøv igjen.', forrige: 'Forrige kobling virker ikke lenger — logg inn på nytt.', velgMaal: 'Last ned til', hele: 'Hele skapet', mapper: 'mapper', filer: 'filer', fil: 'fil', tomMappe: 'Ingen filer i denne mappa.', navn: 'Navn', storrelse: 'Størrelse', hent: 'Last ned', venter: 'venter', laDer: 'lå der', ferdig: 'ferdig', feilet: 'feilet', avbrutt: 'avbrutt', iKo: 'i kø', avbryt: 'Avbryt', apneRawskap: 'Åpne i Rawskap', visUtforsker: 'Vis i Utforsker', visLogg: 'Vis logg', fjern: 'Fjern fra lista', provIgjen: 'Prøv igjen', velgMaalForst: 'Velg en nedlastingsmappe først', ingenOverf: 'Ingen overføringer' };
+  const NO = { til: 'Last ned til', synkVelgLokal: 'Velg den lokale mappa som skal overvåkes', synkVelgSkap: 'Hvilken mappe i skapet skal den gå til?', synkPause: 'Pause', synkFortsett: 'Fortsett', synkFjern: 'Fjern', synkJobb: 'Synk', synkIngen: 'Ingen synk-mapper ennå.', hoppetNavn: 'hoppet over — samme navn finnes', hasher: 'sjekksum …', verifisert: 'verifisert', gjenopptatt: 'Jobber fra forrige gang er hentet inn — trykk «Prøv igjen» på dem du vil fortsette.', fantesFraFor: 'fantes i skapet fra før', lagerPreview: 'lager forhåndsvisning …', lastetOpp: 'Lastet opp', kopierNavn: 'Kopier filnavn', varselFerdig: 'Overføring ferdig', varselFeil: 'Overføring feilet', ryddFerdige: 'Fjern ferdige', kolFiler: 'Filer', kolStatus: 'Status', visOverf: 'Vis overføringer', avbrytKnapp: 'Avbryt', lastOppFiler: 'Velg filer …', lastOppMappe: 'Velg en mappe …', droppHint: 'Tips: dra filer eller mapper rett inn i lista.', iUndermapper: 'i undermapper', nyMappe: '+ Ny mappe', nyMappeTittel: 'Ny mappe', nyMappeTekst: 'Lages i', mappenavn: 'Mappenavn …', her: 'hit', oppTilMappe: 'Lastes opp til', lastOppHit: '⤒ Last opp filer hit', lastOppMappeHit: '⤒ Last opp mappe hit', lastNedDenne: '⤓ Last ned denne mappa', apneMappe: 'Åpne', iRawskap: 'Åpne i Rawskap', oppTil: 'til', opplasting: 'opplasting', videoUtenPoster: 'Video får ikke plakatbilde i denne versjonen — kortet viser filikon til skapet har behandlet den.', lager: 'Lager kode …', bekreft: 'Bekreft koden i nettleseren …', koblet: 'Koblet ✓', utlop: 'Koden utløp — prøv igjen.', forLang: 'Tok for lang tid — prøv igjen.', forrige: 'Forrige kobling virker ikke lenger — logg inn på nytt.', velgMaal: 'Last ned til', hele: 'Hele skapet', mapper: 'mapper', filer: 'filer', fil: 'fil', tomMappe: 'Ingen filer i denne mappa.', navn: 'Navn', storrelse: 'Størrelse', hent: 'Last ned', venter: 'venter', laDer: 'lå der', ferdig: 'ferdig', feilet: 'feilet', avbrutt: 'avbrutt', iKo: 'i kø', avbryt: 'Avbryt', apneRawskap: 'Åpne i Rawskap', visUtforsker: 'Vis i Utforsker', visLogg: 'Vis logg', fjern: 'Fjern fra lista', provIgjen: 'Prøv igjen', velgMaalForst: 'Velg en nedlastingsmappe først', ingenOverf: 'Ingen overføringer' };
   const erNo = /^(nb|nn|no|da|sv)/i.test(navigator.language || '');
   const t = erNo ? NO : EN;
   if (!erNo) { document.getElementById('html').lang = 'en'; document.querySelectorAll('[data-t]').forEach(el => { const v = EN[el.dataset.t]; if (v) el.textContent = v; }); }
@@ -270,6 +279,36 @@
   $('p-v-feil').onchange = () => { P.vFeil = $('p-v-feil').checked; lagreP(); };
   $('p-v-ferdig').onchange = () => { P.vFerdig = $('p-v-ferdig').checked; lagreP(); };
   function valgtMappeMarker(_) { /* tre tegnes om ved neste velgMappe */ }
+  // ── Synk-mapper ──
+  let synker = (await store.get('synk')) || [];
+  const lagreSynk = async () => { await store.set('synk', synker); try { await invoke('synk_sett', { liste: synker.map(x => ({ id: x.id, lokal: x.lokal, mappe_id: x.mappeId || '', navn: x.navn || '', aktiv: !!x.aktiv })) }); } catch (e) { console.error(e); } };
+  function tegnSynk() {
+    const el = $('synk-liste'); el.innerHTML = '';
+    if (!synker.length) { el.innerHTML = `<div class="hint">${t.synkIngen}</div>`; return; }
+    for (const x of synker) {
+      const r = document.createElement('div'); r.className = 'synk-rad';
+      r.innerHTML = `<div><div class="tekst">${lokalNavn(x.lokal)} <span class="pil">→</span> ${x.navn || t.hele}</div><div class="lokal" title="${x.lokal}">${x.lokal}</div></div><span class="hint">${x.aktiv ? '●' : '○'}</span><button class="btn liten">${x.aktiv ? t.synkPause : t.synkFortsett}</button><button class="btn liten">${t.synkFjern}</button>`;
+      const [pause, fjern] = r.querySelectorAll('button');
+      pause.onclick = async () => { x.aktiv = !x.aktiv; await lagreSynk(); tegnSynk(); };
+      fjern.onclick = async () => { synker = synker.filter(y => y !== x); await lagreSynk(); tegnSynk(); };
+      el.appendChild(r);
+    }
+  }
+  $('synk-ny').onclick = async () => {
+    const lokal = await open({ directory: true, multiple: false, title: t.synkVelgLokal }); if (!lokal) return;
+    // Skap-mappe: velg via kontekstmeny-liste (flat, innrykk etter dybde)
+    const valg = [['', t.hele]]; const barnAv = id => data.mapper.filter(m => (m.forelderId || '') === id).sort((a, b) => a.navn.localeCompare(b.navn, 'nb'));
+    const gaa = (id, d) => { for (const m of barnAv(id)) { valg.push([m.id, '\u00a0'.repeat(d * 3) + '📁 ' + m.navn]); gaa(m.id, d + 1); } }; gaa('', 0);
+    const r = $('synk-ny').getBoundingClientRect();
+    visKmeny(r.left, r.bottom + 4, t.synkVelgSkap, valg.map(([id, navn]) => [navn, async () => { synker.push({ id: 's' + Date.now().toString(36), lokal, mappeId: id, navn: id ? mappeNavn(id) : t.hele, aktiv: true }); await lagreSynk(); tegnSynk(); }]));
+  };
+  document.querySelector('[data-side="synk"]').addEventListener('click', tegnSynk);
+  // Funn fra løperne → opplastingsjobb; Rust får beskjed når jobben er ferdig/feilet.
+  await listen('synk-funn', ev => {
+    const f = ev.payload;
+    const filer = f.filer.map(x => ({ sti: x.sti, relativ: x.relativ, bytes: x.bytes, filnavn: lokalNavn(x.sti), id: x.sti }));
+    startJobbNaa(`${t.synkJobb}: ${filer.length} ${filer.length === 1 ? t.fil : t.filer} → ${f.navn || t.hele}`, filer, f.mappe_id, false, 'opp', { synkId: f.id });
+  });
   async function varsle(tittel, tekst) {
     try { const n = window.__TAURI__.notification; let ok = await n.isPermissionGranted(); if (!ok) ok = (await n.requestPermission()) === 'granted'; if (ok) n.sendNotification({ title: tittel, body: tekst }); } catch { /* uten varsler */ }
   }
@@ -282,7 +321,7 @@
     $('konto').textContent = `${data.mapper.length} ${t.mapper} · ${data.filer.length} ${t.filer} · ${fmt(data.totalBytes)}`;
     $('logg-ut').classList.remove('skjult'); $('vis-innst').classList.remove('skjult');
     $('steg-kobling').classList.add('skjult'); $('skall').classList.remove('skjult'); $('overf').classList.remove('skjult');
-    tegnTre(); velgMappe(''); tegnJobber();
+    tegnTre(); velgMappe(''); tegnJobber(); lagreSynk();
   }
   $('logg-inn').onclick = async () => {
     const p = ($('portal').value || 'https://rawskap.no').trim().replace(/\/$/, '');
@@ -465,8 +504,8 @@
     if (type !== 'opp' && (!maal || !P.fastMaal)) { return open({ directory: true, multiple: false, title: t.velgMaal }).then(async v => { if (!v) return; maal = v; await store.set('maal', v); visMaal(); startJobbNaa(navn, filer, mappeId, erMappe, type); }); }
     startJobbNaa(navn, filer, mappeId, erMappe, type);
   }
-  function startJobbNaa(navn, filer, mappeId, erMappe, type) {
-    const j = { id: 'j' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type, navn, mappeId, filer: type === 'opp' ? filer : filer.map(f => ({ id: f.id, filnavn: f.filnavn, bytes: f.bytes, sti: f.sti || '', xxh64: f.xxh64 || '' })), maal: erMappe && mappeId ? `${maal}/${navn.replace(/[\\/:*?"<>|]+/g, '_')}` : maal, status: 'kø', ok: 0, feil: [], logg: !!P.logg, konflikt: P.konflikt };
+  function startJobbNaa(navn, filer, mappeId, erMappe, type, ekstra = {}) {
+    const j = { id: 'j' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type, navn, mappeId, filer: type === 'opp' ? filer : filer.map(f => ({ id: f.id, filnavn: f.filnavn, bytes: f.bytes, sti: f.sti || '', xxh64: f.xxh64 || '' })), maal: erMappe && mappeId ? `${maal}/${navn.replace(/[\\/:*?"<>|]+/g, '_')}` : maal, status: 'kø', ok: 0, feil: [], logg: !!P.logg, konflikt: P.konflikt, ...ekstra };
     jobber.unshift(j); tegnJobber(); lagreKo(); kjørNeste();
   }
   async function kjørNeste() {
@@ -497,6 +536,7 @@
       j.status = j.feil.some(f => /^Avbrutt$/i.test(f.feil || '')) ? 'avbrutt' : j.feil.length ? 'feil' : 'ferdig';
     } catch (e) { j.status = 'feil'; j.feil = [{ feil: String(e) }]; }
     lagreKo();
+    if (j.synkId) { const feilet = new Set((j.feil || []).map(x => x.id)); const ok = j.filer.filter(f => !feilet.has(f.sti)); const ikke = j.filer.filter(f => feilet.has(f.sti)); if (ok.length) invoke('synk_merk', { id: j.synkId, filer: ok.map(f => ({ sti: f.sti, relativ: f.relativ, bytes: f.bytes })), ok: true }).catch(() => {}); if (ikke.length) invoke('synk_merk', { id: j.synkId, filer: ikke.map(f => ({ sti: f.sti, relativ: f.relativ, bytes: f.bytes })), ok: false }).catch(() => {}); }
     if (j.status === 'ferdig' && P.vFerdig) varsle(t.varselFerdig, `${j.navn} · ${j.filer.length} ${t.filer}`);
     if (j.status === 'feil' && P.vFeil) varsle(t.varselFeil, `${j.navn} · ${j.feil.length} ${t.feilet}`);
     aktiv = null; tegnJobber(); kjørNeste();
