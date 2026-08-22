@@ -193,6 +193,25 @@ async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
     Ok(serde_json::json!({ "ok": ok, "feil": feil }))
 }
 
+/// Device-kobling (webviewen kan ikke fetch-e portalen — CORS): start → kode.
+#[tauri::command]
+async fn kobling_start(portal: String, maskin: String) -> Result<serde_json::Value, String> {
+    let k = reqwest::Client::new();
+    let r = k.post(format!("{}/api/rawskap/transfer/kobling", portal.trim_end_matches('/')))
+        .json(&serde_json::json!({ "maskin": maskin })).send().await.map_err(|e| format!("{e}"))?;
+    if !r.status().is_success() { return Err(format!("Portalen svarte {}", r.status())); }
+    r.json::<serde_json::Value>().await.map_err(|e| format!("{e}"))
+}
+
+/// Device-kobling: poll til nøkkelen er godkjent i nettleseren.
+#[tauri::command]
+async fn kobling_poll(portal: String, kode: String) -> Result<serde_json::Value, String> {
+    let k = reqwest::Client::new();
+    let r = k.get(format!("{}/api/rawskap/transfer/kobling?kode={}", portal.trim_end_matches('/'), kode)).send().await.map_err(|e| format!("{e}"))?;
+    if !r.status().is_success() { return Err(format!("Portalen svarte {}", r.status())); }
+    r.json::<serde_json::Value>().await.map_err(|e| format!("{e}"))
+}
+
 #[tauri::command]
 fn avbryt(tilstand: State<'_, Tilstand>) {
     tilstand.avbryt.store(true, Ordering::Relaxed);
@@ -205,7 +224,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .manage(Tilstand::default())
-        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, avbryt])
+        .invoke_handler(tauri::generate_handler![hent_liste, last_ned, avbryt, kobling_start, kobling_poll])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }

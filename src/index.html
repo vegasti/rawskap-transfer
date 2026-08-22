@@ -139,15 +139,15 @@
     const p = ($('portal').value || 'https://rawskap.no').trim().replace(/\/$/, '');
     $('logg-inn').disabled = true; $('kobling-status').textContent = 'Lager kode …';
     try {
-      const r = await fetch(p + '/api/rawskap/transfer/kobling', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ maskin: navigator.platform || 'denne maskinen' }) });
-      const d = await r.json(); if (!d.ok) throw new Error(d.error || 'Kunne ikke lage kode');
+      const d = await invoke('kobling_start', { portal: p, maskin: navigator.platform || 'denne maskinen' });
+      if (!d.ok) throw new Error(d.error || 'Kunne ikke lage kode');
       $('kode-visning').textContent = d.kode.slice(0, 3) + '-' + d.kode.slice(3); $('kode-visning').classList.remove('skjult');
       $('kobling-status').textContent = 'Bekreft koden i nettleseren …';
       openShell(p + (/rawskap\.no/.test(p) ? '/app' : '/rawskap/app') + '?kode=' + d.kode);
       pollStopp = false;
       for (let i = 0; i < 300 && !pollStopp; i++) {
         await new Promise(r => setTimeout(r, 2000));
-        const s = await (await fetch(p + '/api/rawskap/transfer/kobling?kode=' + d.kode)).json();
+        const s = await invoke('kobling_poll', { portal: p, kode: d.kode });
         if (s.ok && s.nokkel) { $('kobling-status').textContent = 'Koblet ✓'; await kobleMed(p, s.nokkel); return; }
         if (s.utlopt) throw new Error('Koden utløp — prøv igjen.');
       }
