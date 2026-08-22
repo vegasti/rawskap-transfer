@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="no">
+<head>
+<meta charset="utf-8" />
+<title>Rawskap Transfer</title>
+<style>
+  :root { --bg:#f5f0eb; --fg:#1d1d1f; --svak:rgba(29,29,31,.6); --svakere:rgba(29,29,31,.4); --kort:#fff; --kant:rgba(29,29,31,.12); --grønn:#325f4e; --rød:#b03030; --thumb:#ddd4c8; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#3d3d3d; --fg:#ece9e4; --svak:rgba(236,233,228,.6); --svakere:rgba(236,233,228,.4); --kort:#4a4a4a; --kant:rgba(255,255,255,.12); --thumb:#2c2c2c; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--fg); height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; gap:12px; padding:14px 20px; background:var(--grønn); color:#f5f0eb; }
+  header .logo { font-family:Georgia,serif; font-weight:700; font-size:20px; letter-spacing:-.01em; }
+  header .logo small { font-weight:400; font-size:12px; opacity:.75; margin-left:6px; letter-spacing:.08em; text-transform:uppercase; }
+  header .høyre { margin-left:auto; font-size:12.5px; opacity:.85; display:flex; gap:10px; align-items:center; }
+  header button { background:none; border:1px solid rgba(245,240,235,.4); color:#f5f0eb; border-radius:4px; padding:5px 10px; font:inherit; font-size:12px; cursor:pointer; }
+  main { flex:1; overflow:auto; padding:20px; }
+  .kort { background:var(--kort); border:1px solid var(--kant); border-radius:12px; padding:18px 20px; margin-bottom:14px; }
+  h2 { font-family:Georgia,serif; font-size:18px; margin:0 0 6px; }
+  p { margin:0 0 10px; line-height:1.5; font-size:13.5px; color:var(--svak); }
+  label { display:block; font-size:11.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--svak); margin:10px 0 5px; font-weight:700; }
+  input[type=text], input[type=password] { width:100%; padding:9px 11px; border:1px solid var(--kant); border-radius:7px; background:transparent; color:inherit; font:inherit; font-size:13.5px; }
+  .rad { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .btn { padding:9px 16px; border-radius:7px; border:1px solid var(--kant); background:transparent; color:inherit; font:inherit; font-size:13.5px; font-weight:600; cursor:pointer; }
+  .btn.primær { background:var(--grønn); color:#f5f0eb; border-color:var(--grønn); }
+  .btn.farlig { color:var(--rød); border-color:var(--rød); }
+  .btn:disabled { opacity:.45; cursor:default; }
+  .tre { display:flex; flex-direction:column; gap:2px; max-height:300px; overflow:auto; border:1px solid var(--kant); border-radius:8px; padding:6px; }
+  .tre button { text-align:left; background:none; border:none; color:inherit; font:inherit; font-size:13.5px; padding:6px 8px; border-radius:6px; cursor:pointer; display:flex; gap:8px; align-items:center; }
+  .tre button:hover { background:rgba(50,95,78,.08); }
+  .tre button.valgt { background:var(--grønn); color:#f5f0eb; }
+  .tre .dybde1 { padding-left:24px; } .tre .dybde2 { padding-left:40px; } .tre .dybde3 { padding-left:56px; } .tre .dybde4 { padding-left:72px; }
+  .oppsummering { font-size:13px; color:var(--svak); margin-top:8px; }
+  .liste { display:flex; flex-direction:column; gap:4px; max-height:360px; overflow:auto; }
+  .fil { display:grid; grid-template-columns:1fr 90px 110px; gap:10px; align-items:center; font-size:12.5px; padding:5px 8px; border-radius:6px; border:1px solid transparent; }
+  .fil .navn { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .fil .sti { color:var(--svakere); font-size:11px; }
+  .fil .bar { height:6px; background:rgba(29,29,31,.08); border-radius:999px; overflow:hidden; }
+  .fil .bar i { display:block; height:100%; background:var(--grønn); width:0; transition:width .15s; }
+  .fil.ferdig .bar i, .fil.hoppet .bar i { width:100%; }
+  .fil.hoppet .bar i { background:var(--svakere); }
+  .fil.feil { border-color:rgba(176,48,48,.4); }
+  .fil .status { text-align:right; font-variant-numeric:tabular-nums; color:var(--svak); white-space:nowrap; }
+  .total { display:flex; gap:14px; align-items:center; margin:12px 0; font-size:13.5px; }
+  .total .bar { flex:1; height:10px; background:rgba(29,29,31,.08); border-radius:999px; overflow:hidden; }
+  .total .bar i { display:block; height:100%; background:var(--grønn); width:0; transition:width .2s; }
+  .feilboks { background:rgba(176,48,48,.08); color:var(--rød); padding:8px 11px; border-radius:7px; font-size:13px; margin-top:8px; }
+  .skjult { display:none; }
+  .hjelp { font-size:12px; color:var(--svakere); }
+  a { color:var(--grønn); }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">rawskap<small>transfer · v0</small></div>
+  <div class="høyre"><span id="konto" class="hjelp" style="color:#f5f0eb;opacity:.8"></span><button id="koble-fra" class="skjult">Koble fra</button></div>
+</header>
+<main>
+  <!-- Steg 1: kobling -->
+  <section id="steg-kobling" class="kort">
+    <h2>Koble til skapet</h2>
+    <p>Lag en app-nøkkel i portalen (logget inn → <a href="#" id="apne-portal">portal.rawstudios.no/rawskap/app</a>), lim den inn her. Nøkkelen gjelder i 180 dager og ligger bare på denne maskinen.</p>
+    <label>Portal</label>
+    <input type="text" id="portal" value="https://portal.rawstudios.no" />
+    <label>App-nøkkel</label>
+    <input type="password" id="nokkel" placeholder="lim inn nøkkelen …" />
+    <div class="rad" style="margin-top:12px">
+      <button class="btn primær" id="koble">Koble til</button>
+      <span id="kobling-feil" class="hjelp"></span>
+    </div>
+  </section>
+
+  <!-- Steg 2: velg mappe -->
+  <section id="steg-velg" class="kort skjult">
+    <h2>Hva skal hentes?</h2>
+    <p>Velg en mappe — undermapper følger med og gjenskapes på disk. Filer som allerede ligger der med riktig størrelse hoppes over, og avbrutte filer fortsetter der de slapp.</p>
+    <div class="tre" id="tre"></div>
+    <div class="oppsummering" id="oppsummering"></div>
+    <label>Last ned til</label>
+    <div class="rad">
+      <input type="text" id="maal" placeholder="velg en mappe på disken …" readonly style="flex:1" />
+      <button class="btn" id="velg-maal">Bla …</button>
+    </div>
+    <div class="rad" style="margin-top:14px">
+      <button class="btn primær" id="start" disabled>⤓ Last ned</button>
+      <span class="hjelp">Parallelle strømmer: <select id="parallell"><option>2</option><option selected>3</option><option>4</option><option>6</option></select></span>
+    </div>
+  </section>
+
+  <!-- Steg 3: framdrift -->
+  <section id="steg-laster" class="kort skjult">
+    <h2 id="laster-tittel">Laster ned …</h2>
+    <div class="total"><div class="bar"><i id="total-bar"></i></div><span id="total-tekst"></span></div>
+    <div class="liste" id="liste"></div>
+    <div id="feil-oppsummering" class="feilboks skjult"></div>
+    <div class="rad" style="margin-top:14px">
+      <button class="btn farlig" id="avbryt">Avbryt</button>
+      <button class="btn" id="tilbake" class="skjult">← Velg en annen mappe</button>
+      <button class="btn" id="apne-mappe">Åpne mappa</button>
+    </div>
+  </section>
+</main>
+<script type="module">
+  const { invoke } = window.__TAURI__.core;
+  const { listen } = window.__TAURI__.event;
+  const { open } = window.__TAURI__.dialog;
+  const { open: openShell } = window.__TAURI__.shell;
+  const { load } = window.__TAURI__.store;
+
+  const $ = id => document.getElementById(id);
+  const fmt = b => b >= 1e9 ? `${(b/1e9).toFixed(2)} GB` : b >= 1e6 ? `${(b/1e6).toFixed(1)} MB` : `${Math.round(b/1e3)} kB`;
+  const store = await load('transfer.json', { autoSave: true });
+
+  let portal = '', nokkel = '', data = null, valgtMappe = '', maal = '', filer = [];
+
+  // ── Kobling ──
+  const lagret = await store.get('kobling');
+  if (lagret?.nokkel) { $('portal').value = lagret.portal; $('nokkel').value = lagret.nokkel; }
+  if (await store.get('maal')) { maal = await store.get('maal'); $('maal').value = maal; }
+  $('apne-portal').onclick = e => { e.preventDefault(); openShell(($('portal').value || 'https://portal.rawstudios.no').replace(/\/$/, '') + '/rawskap/app'); };
+  $('koble').onclick = async () => {
+    portal = $('portal').value.trim().replace(/\/$/, ''); nokkel = $('nokkel').value.trim();
+    $('kobling-feil').textContent = ''; $('koble').disabled = true; $('koble').textContent = 'Kobler …';
+    try {
+      data = await invoke('hent_liste', { portal, nokkel, mappe: '' });
+      await store.set('kobling', { portal, nokkel });
+      $('konto').textContent = `${data.mapper.length} mapper · ${data.filer.length} filer · ${fmt(data.totalBytes)}`;
+      $('koble-fra').classList.remove('skjult');
+      $('steg-kobling').classList.add('skjult'); $('steg-velg').classList.remove('skjult');
+      tegnTre();
+    } catch (e) { $('kobling-feil').textContent = String(e); }
+    finally { $('koble').disabled = false; $('koble').textContent = 'Koble til'; }
+  };
+  $('koble-fra').onclick = async () => { await store.delete('kobling'); location.reload(); };
+  if (lagret?.nokkel) $('koble').click();
+
+  // ── Mappetre ──
+  function tegnTre() {
+    const tre = $('tre'); tre.innerHTML = '';
+    const barnAv = id => data.mapper.filter(m => (m.forelderId || '') === id).sort((a, b) => a.navn.localeCompare(b.navn, 'nb'));
+    const telling = new Map();
+    for (const f of data.filer) { telling.set(f.mappeId || '', (telling.get(f.mappeId || '') || 0) + 1); }
+    const rad = (id, navn, dybde) => {
+      const b = document.createElement('button');
+      b.className = `dybde${Math.min(dybde, 4)}` + (id === valgtMappe ? ' valgt' : '');
+      b.innerHTML = `<span>${dybde === 0 ? '🗄' : '📁'}</span><span>${navn}</span>`;
+      b.onclick = () => { valgtMappe = id; tegnTre(); velgFiler(); };
+      tre.appendChild(b);
+      for (const m of barnAv(id)) rad(m.id, m.navn, dybde + 1);
+    };
+    rad('', 'Hele skapet', 0);
+  }
+  async function velgFiler() {
+    const under = new Set();
+    const forelder = new Map(data.mapper.map(m => [m.id, m.forelderId || '']));
+    const erUnder = id => { let k = id, v = 0; while (k && v++ < 30) { if (k === valgtMappe) return true; k = forelder.get(k) || ''; } return !valgtMappe; };
+    for (const m of data.mapper) if (erUnder(m.id)) under.add(m.id);
+    // Stier relativt til valgt mappe regnes av portalen — hent lista på nytt for mappa.
+    const d = await invoke('hent_liste', { portal, nokkel, mappe: valgtMappe });
+    filer = d.filer;
+    $('oppsummering').textContent = `${filer.length} filer · ${fmt(d.totalBytes)}`;
+    $('start').disabled = !filer.length || !maal;
+  }
+  $('velg-maal').onclick = async () => {
+    const v = await open({ directory: true, multiple: false, title: 'Last ned til' });
+    if (v) { maal = v; $('maal').value = v; await store.set('maal', v); $('start').disabled = !filer.length; }
+  };
+
+  // ── Nedlasting ──
+  const tilstand = new Map();
+  let totalBytes = 0;
+  function tegnFil(f) {
+    const el = document.createElement('div'); el.className = 'fil'; el.id = 'f-' + f.id;
+    el.innerHTML = `<div class="navn" title="${f.filnavn}">${f.filnavn}<div class="sti">${f.sti || ''}</div></div><div class="bar"><i></i></div><div class="status">venter</div>`;
+    $('liste').appendChild(el);
+  }
+  function oppdaterTotal() {
+    let hentet = 0, ferdig = 0, feil = 0;
+    for (const f of filer) { const t = tilstand.get(f.id); if (!t) continue; hentet += t.status === 'ferdig' || t.status === 'hoppet' ? f.bytes : t.hentet; if (t.status === 'ferdig' || t.status === 'hoppet') ferdig++; if (t.status === 'feil') feil++; }
+    $('total-bar').style.width = totalBytes ? `${Math.min(100, hentet / totalBytes * 100)}%` : '0%';
+    $('total-tekst').textContent = `${ferdig} av ${filer.length} · ${fmt(hentet)} / ${fmt(totalBytes)}${feil ? ` · ${feil} feilet` : ''}`;
+  }
+  await listen('framdrift', ev => {
+    const p = ev.payload; tilstand.set(p.id, p);
+    const el = $('f-' + p.id); if (!el) return;
+    el.className = 'fil ' + p.status;
+    const pst = p.total ? Math.min(100, p.hentet / p.total * 100) : 0;
+    el.querySelector('.bar i').style.width = p.status === 'ferdig' || p.status === 'hoppet' ? '100%' : `${pst}%`;
+    el.querySelector('.status').textContent = p.status === 'ferdig' ? '✓ ferdig' : p.status === 'hoppet' ? '✓ lå der' : p.status === 'feil' ? '✕ ' + (p.feil || 'feil') : `${fmt(p.hentet)} / ${fmt(p.total)}`;
+    if (p.status === 'feil') el.title = p.feil || '';
+    oppdaterTotal();
+  });
+  $('start').onclick = async () => {
+    $('steg-velg').classList.add('skjult'); $('steg-laster').classList.remove('skjult');
+    $('liste').innerHTML = ''; tilstand.clear(); $('feil-oppsummering').classList.add('skjult');
+    totalBytes = filer.reduce((s, f) => s + f.bytes, 0);
+    for (const f of filer) tegnFil(f);
+    $('laster-tittel').textContent = 'Laster ned …'; $('avbryt').disabled = false;
+    oppdaterTotal();
+    try {
+      const res = await invoke('last_ned', { portal, nokkel, filer: filer.map(f => ({ id: f.id, filnavn: f.filnavn, bytes: f.bytes, sti: f.sti })), maal, parallell: Number($('parallell').value) });
+      $('laster-tittel').textContent = res.feil.length ? `Ferdig — ${res.ok} ok, ${res.feil.length} feilet` : `✓ Ferdig — ${res.ok} filer`;
+      if (res.feil.length) { $('feil-oppsummering').textContent = 'Noen filer feilet. Trykk «Last ned» igjen — de fortsetter der de slapp.'; $('feil-oppsummering').classList.remove('skjult'); }
+    } catch (e) { $('laster-tittel').textContent = 'Stoppet'; $('feil-oppsummering').textContent = String(e); $('feil-oppsummering').classList.remove('skjult'); }
+    $('avbryt').disabled = true;
+  };
+  $('avbryt').onclick = () => invoke('avbryt');
+  $('tilbake').onclick = () => { $('steg-laster').classList.add('skjult'); $('steg-velg').classList.remove('skjult'); };
+  $('apne-mappe').onclick = () => { if (maal) openShell(maal); };
+</script>
+</body>
+</html>
