@@ -32,6 +32,27 @@ struct Framdrift {
     feil: Option<String>,
 }
 
+/// Logg per jobb (valgfritt, Frame.io-stil): én fil i målmappa med start/ferdig
+/// per fil + oppsummering. Størrelses-verifisert (ingen hasher lagret ennå).
+struct Logg { fil: tokio::sync::Mutex<tokio::fs::File> }
+impl Logg {
+    async fn skriv(&self, linje: &str) {
+        let ts = chrono_lite();
+        let mut f = self.fil.lock().await;
+        let _ = f.write_all(format!("{ts} {linje}
+").as_bytes()).await;
+    }
+}
+fn chrono_lite() -> String {
+    // yyyy/mm/dd hh:mm:ss lokal tid uten chrono-avhengighet: bruk std + enkel UTC-offset fra OS er overkill — vi bruker UTC og merker det.
+    let d = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let (dager, rest) = (d / 86400, d % 86400);
+    let (h, m, s) = (rest / 3600, (rest % 3600) / 60, rest % 60);
+    // sivil dato fra dagnummer (Howard Hinnant)
+    let z = dager as i64 + 719468; let era = z.div_euclid(146097); let doe = z - era * 146097; let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; let y = yoe + era * 400; let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); let mp = (5 * doy + 2) / 153; let dd = doy - (153 * mp + 2) / 5 + 1; let mm = if mp < 10 { mp + 3 } else { mp - 9 }; let yy = if mm <= 2 { y + 1 } else { y };
+    format!("{yy:04}/{mm:02}/{dd:02} {h:02}:{m:02}:{s:02}Z")
+}
+
 #[derive(Default)]
 pub struct Tilstand {
     avbryt: Arc<AtomicBool>,
@@ -158,8 +179,17 @@ async fn last_ned_en(
 
 /// Last ned et sett filer til en mappe — `parallell` samtidige strømmer.
 #[tauri::command]
-async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String, nokkel: String, filer: Vec<Fil>, maal: String, parallell: usize) -> Result<serde_json::Value, String> {
+async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String, nokkel: String, filer: Vec<Fil>, maal: String, parallell: usize, logg: bool, jobbnavn: String) -> Result<serde_json::Value, String> {
     tilstand.avbryt.store(false, Ordering::Relaxed);
+    let rot0 = PathBuf::from(&maal);
+    tokio::fs::create_dir_all(&rot0).await.map_err(|e| format!("{e}"))?;
+    let loggen: Option<Arc<Logg>> = if logg {
+        let navn = format!("{} {}.log", trygt_navn(&jobbnavn), chrono_lite().replace(['/', ':', ' '], "-").trim_end_matches('Z'));
+        match tokio::fs::OpenOptions::new().create(true).append(true).open(rot0.join(&navn)).await {
+            Ok(f) => { let l = Arc::new(Logg { fil: tokio::sync::Mutex::new(f) }); l.skriv(&format!("Rawskap Transfer - {} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::OS)).await; l.skriv(&format!("Jobb: {} | {} filer | mål: {}", jobbnavn, filer.len(), maal)).await; l.skriv("").await; Some(l) }
+            Err(_) => None,
+        }
+    } else { None };
     let k = klient(&nokkel)?;
     let bare = reqwest::Client::builder().build().map_err(|e| format!("{e}"))?;
     let rot = PathBuf::from(&maal);
@@ -168,9 +198,11 @@ async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
     let avbryt = tilstand.avbryt.clone();
     let mut jobber = Vec::new();
     for fil in filer {
-        let (app, k, bare, portal, rot, sem, avbryt) = (app.clone(), k.clone(), bare.clone(), portal.clone(), rot.clone(), sem.clone(), avbryt.clone());
+        let (app, k, bare, portal, rot, sem, avbryt, loggen) = (app.clone(), k.clone(), bare.clone(), portal.clone(), rot.clone(), sem.clone(), avbryt.clone(), loggen.clone());
         jobber.push(tokio::spawn(async move {
             let _p = sem.acquire().await;
+            let sti = if fil.sti.is_empty() { rot.join(trygt_navn(&fil.filnavn)) } else { rot.join(&fil.sti).join(trygt_navn(&fil.filnavn)) };
+            if let Some(l) = &loggen { l.skriv(&format!("🚀 Startet                | ID: {} | {}", fil.id, sti.display())).await; }
             if avbryt.load(Ordering::Relaxed) { return (fil.id.clone(), Err::<(), String>("Avbrutt".into())); }
             let _ = app.emit("framdrift", Framdrift { id: fil.id.clone(), hentet: 0, total: fil.bytes, status: "laster".into(), feil: None });
             // Inntil 3 forsøk per fil — resume gjør hvert forsøk billig.
@@ -182,13 +214,23 @@ async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
             }
             if let Err(e) = &res {
                 let _ = app.emit("framdrift", Framdrift { id: fil.id.clone(), hentet: 0, total: fil.bytes, status: "feil".into(), feil: Some(e.clone()) });
-            }
+                if let Some(l) = &loggen { l.skriv(&format!("❌ {:<22} | ID: {} | {}", if e == "Avbrutt" { "Avbrutt" } else { "Feilet" }, fil.id, e)).await; }
+            } else if let Some(l) = &loggen { l.skriv(&format!("✅ Ferdig & størrelse ok  | {:>12} B | ID: {} | {}", fil.bytes, fil.id, sti.display())).await; }
             (fil.id.clone(), res)
         }));
     }
     let mut ok = 0usize; let mut feil = Vec::new();
     for j in jobber {
         match j.await { Ok((_, Ok(()))) => ok += 1, Ok((id, Err(e))) => feil.push(serde_json::json!({ "id": id, "feil": e })), Err(e) => feil.push(serde_json::json!({ "feil": format!("{e}") })) }
+    }
+    if let Some(l) = &loggen {
+        let avbrutt = feil.iter().filter(|f| f["feil"].as_str() == Some("Avbrutt")).count();
+        l.skriv("🏁 ===== nedlasting ferdig =====").await;
+        l.skriv(&format!("
+	Totalt: {}
+	Lastet ned: {}
+	Feilet: {}
+	Avbrutt: {}", ok + feil.len(), ok, feil.len() - avbrutt, avbrutt)).await;
     }
     Ok(serde_json::json!({ "ok": ok, "feil": feil }))
 }

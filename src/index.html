@@ -4,108 +4,135 @@
 <meta charset="utf-8" />
 <title>Rawskap Transfer</title>
 <style>
-  :root { --bg:#f5f0eb; --fg:#1d1d1f; --svak:rgba(29,29,31,.6); --svakere:rgba(29,29,31,.4); --kort:#fff; --kant:rgba(29,29,31,.12); --grønn:#325f4e; --rød:#b03030; --thumb:#ddd4c8; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#3d3d3d; --fg:#ece9e4; --svak:rgba(236,233,228,.6); --svakere:rgba(236,233,228,.4); --kort:#4a4a4a; --kant:rgba(255,255,255,.12); --thumb:#2c2c2c; } }
+  :root { --bg:#f5f0eb; --fg:#1d1d1f; --svak:rgba(29,29,31,.6); --svakere:rgba(29,29,31,.4); --kort:#fff; --kant:rgba(29,29,31,.12); --flate:rgba(29,29,31,.045); --grønn:#325f4e; --rød:#b03030; --side:#ece6df; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#3d3d3d; --fg:#ece9e4; --svak:rgba(236,233,228,.6); --svakere:rgba(236,233,228,.4); --kort:#4a4a4a; --kant:rgba(255,255,255,.12); --flate:rgba(255,255,255,.06); --side:#353535; } }
   * { box-sizing:border-box; }
-  body { margin:0; font-family:-apple-system,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--fg); height:100vh; display:flex; flex-direction:column; }
-  header { display:flex; align-items:center; gap:12px; padding:14px 20px; background:var(--grønn); color:#f5f0eb; }
+  body { margin:0; font-family:-apple-system,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--fg); height:100vh; display:flex; flex-direction:column; overflow:hidden; font-size:13.5px; }
+  header { display:flex; align-items:center; gap:12px; padding:12px 18px; background:var(--grønn); color:#f5f0eb; flex:0 0 auto; }
   header .logo { font-family:Georgia,serif; font-weight:700; font-size:20px; letter-spacing:-.01em; }
   header .logo small { font-weight:400; font-size:12px; opacity:.75; margin-left:6px; letter-spacing:.08em; text-transform:uppercase; }
-  header .høyre { margin-left:auto; font-size:12.5px; opacity:.85; display:flex; gap:10px; align-items:center; }
+  header .høyre { margin-left:auto; font-size:12.5px; opacity:.9; display:flex; gap:10px; align-items:center; }
   header button { background:none; border:1px solid rgba(245,240,235,.4); color:#f5f0eb; border-radius:4px; padding:5px 10px; font:inherit; font-size:12px; cursor:pointer; }
-  main { flex:1; overflow:auto; padding:20px; }
-  .kort { background:var(--kort); border:1px solid var(--kant); border-radius:12px; padding:18px 20px; margin-bottom:14px; }
-  h2 { font-family:Georgia,serif; font-size:18px; margin:0 0 6px; }
-  p { margin:0 0 10px; line-height:1.5; font-size:13.5px; color:var(--svak); }
-  label { display:block; font-size:11.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--svak); margin:10px 0 5px; font-weight:700; }
-  input[type=text], input[type=password] { width:100%; padding:9px 11px; border:1px solid var(--kant); border-radius:7px; background:transparent; color:inherit; font:inherit; font-size:13.5px; }
-  .rad { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-  .btn { padding:9px 16px; border-radius:7px; border:1px solid var(--kant); background:transparent; color:inherit; font:inherit; font-size:13.5px; font-weight:600; cursor:pointer; }
+  .skall { flex:1; display:grid; grid-template-columns:250px 1fr; min-height:0; }
+  aside { background:var(--side); border-right:1px solid var(--kant); overflow:auto; padding:10px 8px; }
+  aside .tre button { width:100%; text-align:left; background:none; border:none; color:inherit; font:inherit; padding:6px 9px; border-radius:6px; cursor:pointer; display:flex; gap:8px; align-items:center; white-space:nowrap; }
+  aside .tre button:hover { background:rgba(50,95,78,.1); }
+  aside .tre button.valgt { background:var(--grønn); color:#f5f0eb; }
+  aside .tre .dybde1 { padding-left:26px; } aside .tre .dybde2 { padding-left:42px; } aside .tre .dybde3 { padding-left:58px; } aside .tre .dybde4 { padding-left:74px; }
+  aside .tre small { margin-left:auto; font-size:11px; opacity:.6; }
+  .hoved { display:flex; flex-direction:column; min-height:0; }
+  .verktøy { display:flex; align-items:center; gap:10px; padding:12px 18px; border-bottom:1px solid var(--kant); flex:0 0 auto; }
+  .verktøy h2 { font-family:Georgia,serif; font-size:18px; margin:0; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .verktøy .meta { font-size:12.5px; color:var(--svak); white-space:nowrap; }
+  .btn { padding:8px 14px; border-radius:7px; border:1px solid var(--kant); background:transparent; color:inherit; font:inherit; font-size:13px; font-weight:600; cursor:pointer; white-space:nowrap; }
   .btn.primær { background:var(--grønn); color:#f5f0eb; border-color:var(--grønn); }
   .btn.farlig { color:var(--rød); border-color:var(--rød); }
+  .btn.liten { padding:4px 10px; font-size:12px; font-weight:500; }
   .btn:disabled { opacity:.45; cursor:default; }
-  .tre { display:flex; flex-direction:column; gap:2px; max-height:300px; overflow:auto; border:1px solid var(--kant); border-radius:8px; padding:6px; }
-  .tre button { text-align:left; background:none; border:none; color:inherit; font:inherit; font-size:13.5px; padding:6px 8px; border-radius:6px; cursor:pointer; display:flex; gap:8px; align-items:center; }
-  .tre button:hover { background:rgba(50,95,78,.08); }
-  .tre button.valgt { background:var(--grønn); color:#f5f0eb; }
-  .tre .dybde1 { padding-left:24px; } .tre .dybde2 { padding-left:40px; } .tre .dybde3 { padding-left:56px; } .tre .dybde4 { padding-left:72px; }
-  .oppsummering { font-size:13px; color:var(--svak); margin-top:8px; }
-  .liste { display:flex; flex-direction:column; gap:4px; max-height:360px; overflow:auto; }
-  .fil { display:grid; grid-template-columns:1fr 90px 110px; gap:10px; align-items:center; font-size:12.5px; padding:5px 8px; border-radius:6px; border:1px solid transparent; }
+  .bryter { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--svak); cursor:pointer; user-select:none; }
+  .filer { flex:1; overflow:auto; padding:6px 10px; }
+  .filrad { display:grid; grid-template-columns:1fr 100px 90px; gap:12px; align-items:center; padding:7px 8px; border-radius:6px; font-size:13px; }
+  .filrad:hover { background:var(--flate); }
+  .filrad.hode { color:var(--svak); font-size:11px; letter-spacing:.1em; text-transform:uppercase; font-weight:700; position:sticky; top:0; background:var(--bg); }
+  .filrad .navn { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .filrad .navn small { color:var(--svakere); margin-left:6px; font-size:11px; }
+  .filrad .tall { text-align:right; font-variant-numeric:tabular-nums; color:var(--svak); }
+  .filrad .hent { text-align:right; }
+  .filrad .hent button { opacity:0; }
+  .filrad:hover .hent button { opacity:1; }
+  .tom { padding:40px; text-align:center; color:var(--svak); }
+  /* Overføringer — linja nederst (Frame.io-modellen) */
+  .overf { flex:0 0 auto; border-top:1px solid var(--kant); background:var(--kort); }
+  .overf-linje { display:flex; align-items:center; gap:12px; padding:9px 18px; cursor:pointer; user-select:none; }
+  .overf-linje strong { font-size:13px; }
+  .overf-linje .bar { flex:1; height:6px; background:rgba(29,29,31,.1); border-radius:999px; overflow:hidden; max-width:420px; }
+  .overf-linje .bar i { display:block; height:100%; background:var(--grønn); width:0; transition:width .2s; }
+  .overf-linje .tekst { font-size:12.5px; color:var(--svak); }
+  .overf-linje .pil { margin-left:auto; color:var(--svakere); font-size:12px; }
+  .overf-panel { display:none; max-height:42vh; overflow:auto; border-top:1px solid var(--kant); padding:6px 10px 10px; }
+  .overf.åpen .overf-panel { display:block; }
+  .jobb { border:1px solid var(--kant); border-radius:9px; padding:8px 12px; margin:6px 0; }
+  .jobb-hode { display:grid; grid-template-columns:1fr 220px 170px auto; gap:12px; align-items:center; cursor:pointer; }
+  .jobb-hode .navn { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .jobb-hode .navn small { font-weight:400; color:var(--svak); margin-left:6px; }
+  .jobb-hode .bar { height:6px; background:rgba(29,29,31,.1); border-radius:999px; overflow:hidden; }
+  .jobb-hode .bar i { display:block; height:100%; background:var(--grønn); width:0; transition:width .2s; }
+  .jobb-hode .status { font-size:12px; color:var(--svak); text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .jobb-hode .rad { position:relative; }
+  .meny { position:absolute; right:0; top:calc(100% + 4px); background:var(--kort); border:1px solid var(--kant); border-radius:9px; box-shadow:0 12px 30px rgba(0,0,0,.25); padding:5px; min-width:210px; z-index:5; display:none; }
+  .meny.åpen { display:block; }
+  .meny button { display:block; width:100%; text-align:left; background:none; border:none; color:inherit; font:inherit; font-size:13px; padding:8px 10px; border-radius:6px; cursor:pointer; }
+  .meny button:hover { background:var(--flate); }
+  .meny hr { border:0; border-top:1px solid var(--kant); margin:4px 0; }
+  .jobb-filer { display:none; margin-top:8px; max-height:220px; overflow:auto; }
+  .jobb.åpen .jobb-filer { display:block; }
+  .fil { display:grid; grid-template-columns:1fr 90px 130px; gap:10px; align-items:center; font-size:12px; padding:3px 6px; border-radius:5px; }
   .fil .navn { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .fil .sti { color:var(--svakere); font-size:11px; }
-  .fil .bar { height:6px; background:rgba(29,29,31,.08); border-radius:999px; overflow:hidden; }
-  .fil .bar i { display:block; height:100%; background:var(--grønn); width:0; transition:width .15s; }
-  .fil.ferdig .bar i, .fil.hoppet .bar i { width:100%; }
-  .fil.hoppet .bar i { background:var(--svakere); }
-  .fil.feil { border-color:rgba(176,48,48,.4); }
-  .fil .status { text-align:right; font-variant-numeric:tabular-nums; color:var(--svak); white-space:nowrap; }
-  .total { display:flex; gap:14px; align-items:center; margin:12px 0; font-size:13.5px; }
-  .total .bar { flex:1; height:10px; background:rgba(29,29,31,.08); border-radius:999px; overflow:hidden; }
-  .total .bar i { display:block; height:100%; background:var(--grønn); width:0; transition:width .2s; }
-  .feilboks { background:rgba(176,48,48,.08); color:var(--rød); padding:8px 11px; border-radius:7px; font-size:13px; margin-top:8px; }
-  .skjult { display:none; }
+  .fil .bar { height:5px; background:rgba(29,29,31,.1); border-radius:999px; overflow:hidden; }
+  .fil .bar i { display:block; height:100%; background:var(--grønn); width:0; }
+  .fil.ferdig .bar i, .fil.hoppet .bar i { width:100%; } .fil.hoppet .bar i { background:var(--svakere); }
+  .fil.feil { color:var(--rød); }
+  .fil .status { text-align:right; color:var(--svak); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  /* Kobling */
+  .kobling { max-width:560px; margin:60px auto; background:var(--kort); border:1px solid var(--kant); border-radius:12px; padding:22px 24px; }
+  .kobling h2 { font-family:Georgia,serif; font-size:20px; margin:0 0 6px; }
+  .kobling p { color:var(--svak); line-height:1.5; margin:0 0 14px; }
+  label { display:block; font-size:11.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--svak); margin:10px 0 5px; font-weight:700; }
+  input[type=text], input[type=password] { width:100%; padding:9px 11px; border:1px solid var(--kant); border-radius:7px; background:transparent; color:inherit; font:inherit; }
+  .rad { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
   .hjelp { font-size:12px; color:var(--svakere); }
-  a { color:var(--grønn); }
+  .skjult { display:none !important; }
+  .kode { font-family:ui-monospace,monospace; font-size:22px; letter-spacing:.15em; font-weight:700; }
 </style>
 </head>
 <body>
 <header>
   <div class="logo">rawskap<small>transfer · v0</small></div>
-  <div class="høyre"><span id="konto" class="hjelp" style="color:#f5f0eb;opacity:.8"></span><button id="koble-fra" class="skjult" data-t="loggUt" title="Logger appen ut av kontoen — stopper også nedlastinger">Logg ut</button></div>
+  <div class="høyre"><span id="konto"></span><button id="logg-ut" class="skjult" data-t="loggUt" title="Logger appen ut av kontoen — stopper også overføringer">Logg ut</button></div>
 </header>
-<main>
-  <!-- Steg 1: kobling -->
-  <section id="steg-kobling" class="kort">
-    <h2 data-t="koble">Koble til skapet</h2>
-    <p data-t="kobleTekst">Logg inn i nettleseren — slik du pleier (e-post, Google eller Microsoft) — og trykk «Koble til» der. Appen kobles automatisk. Ingenting å kopiere.</p>
-    <div class="rad">
-      <button class="btn primær" id="logg-inn" data-t="loggInn">Logg inn i nettleseren</button>
-      <span id="kode-visning" class="skjult" style="font-family:ui-monospace,monospace;font-size:22px;letter-spacing:.15em;font-weight:700"></span>
-      <span id="kobling-status" class="hjelp"></span>
-    </div>
-    <details style="margin-top:16px">
-      <summary class="hjelp" style="cursor:pointer" data-t="avansert">Avansert: annen adresse eller nøkkel</summary>
-      <label data-t="adresse">Rawskap-adresse</label>
-      <input type="text" id="portal" value="https://rawskap.no" />
-      <label data-t="nokkel">Nøkkel (app-nøkkel eller API-nøkkel)</label>
-      <input type="password" id="nokkel" placeholder="lim inn nøkkelen …" />
-      <div class="rad" style="margin-top:12px">
-        <button class="btn" id="koble" data-t="kobleNokkel">Koble til med nøkkel</button>
-        <span id="kobling-feil" class="hjelp"></span>
-      </div>
-    </details>
-  </section>
 
-  <!-- Steg 2: velg mappe -->
-  <section id="steg-velg" class="kort skjult">
-    <h2 data-t="hva">Hva skal hentes?</h2>
-    <p data-t="hvaTekst">Velg en mappe — undermapper følger med og gjenskapes på disk. Filer som allerede ligger der med riktig størrelse hoppes over, og avbrutte filer fortsetter der de slapp.</p>
-    <div class="tre" id="tre"></div>
-    <div class="oppsummering" id="oppsummering"></div>
-    <label data-t="til">Last ned til</label>
-    <div class="rad">
-      <input type="text" id="maal" placeholder="velg en mappe på disken …" readonly style="flex:1" />
-      <button class="btn" id="velg-maal" data-t="bla">Bla …</button>
-    </div>
-    <div class="rad" style="margin-top:14px">
-      <button class="btn primær" id="start" disabled data-t="lastNed">⤓ Last ned</button>
-    </div>
-  </section>
+<section id="steg-kobling" class="kobling">
+  <h2 data-t="koble">Koble til skapet</h2>
+  <p data-t="kobleTekst">Logg inn i nettleseren — slik du pleier (e-post, Google eller Microsoft) — og trykk «Koble til» der. Appen kobles automatisk. Ingenting å kopiere.</p>
+  <div class="rad">
+    <button class="btn primær" id="logg-inn" data-t="loggInn">Logg inn i nettleseren</button>
+    <span id="kode-visning" class="kode skjult"></span>
+    <span id="kobling-status" class="hjelp"></span>
+  </div>
+  <details style="margin-top:16px">
+    <summary class="hjelp" style="cursor:pointer" data-t="avansert">Avansert: annen adresse eller nøkkel</summary>
+    <label data-t="adresse">Rawskap-adresse</label>
+    <input type="text" id="portal" value="https://rawskap.no" />
+    <label data-t="nokkel">Nøkkel (app-nøkkel eller API-nøkkel)</label>
+    <input type="password" id="nokkel" placeholder="…" />
+    <div class="rad" style="margin-top:12px"><button class="btn" id="koble" data-t="kobleNokkel">Koble til med nøkkel</button><span id="kobling-feil" class="hjelp"></span></div>
+  </details>
+</section>
 
-  <!-- Steg 3: framdrift -->
-  <section id="steg-laster" class="kort skjult">
-    <h2 id="laster-tittel">Laster ned …</h2>
-    <div class="total"><div class="bar"><i id="total-bar"></i></div><span id="total-tekst"></span></div>
-    <div class="liste" id="liste"></div>
-    <div id="feil-oppsummering" class="feilboks skjult"></div>
-    <div class="rad" style="margin-top:14px">
-      <button class="btn farlig" id="avbryt" data-t="avbryt">Avbryt nedlastingen</button>
-      <button class="btn" id="tilbake" data-t="tilbake">← Velg en annen mappe</button>
-      <button class="btn" id="apne-mappe" data-t="apne">Åpne mappa</button>
+<div id="skall" class="skall skjult">
+  <aside><div class="tre" id="tre"></div></aside>
+  <div class="hoved">
+    <div class="verktøy">
+      <h2 id="mappe-tittel"></h2>
+      <span class="meta" id="mappe-meta"></span>
+      <label class="bryter" style="margin:0"><input type="checkbox" id="logg-bryter" /> <span data-t="skrivLogg">Skriv logg</span></label>
+      <button class="btn liten" id="velg-maal"><span data-t="til">Last ned til</span>: <span id="maal-navn">…</span></button>
+      <button class="btn primær" id="last-ned-mappe" data-t="lastNedMappe">⤓ Last ned mappa</button>
     </div>
-  </section>
-</main>
+    <div class="filer" id="filer"></div>
+  </div>
+</div>
+
+<div id="overf" class="overf skjult">
+  <div class="overf-linje" id="overf-linje">
+    <strong>⇅ <span data-t="overforinger">Overføringer</span></strong>
+    <div class="bar"><i id="overf-bar"></i></div>
+    <span class="tekst" id="overf-tekst" data-t="ingenOverf">Ingen overføringer</span>
+    <span class="pil" id="overf-pil">▲</span>
+  </div>
+  <div class="overf-panel" id="overf-panel"></div>
+</div>
+
 <script type="module">
   const { invoke } = window.__TAURI__.core;
   const { listen } = window.__TAURI__.event;
@@ -113,10 +140,9 @@
   const { open: openShell } = window.__TAURI__.shell;
   const { load } = window.__TAURI__.store;
 
-  // ── Språk: systemspråk (norsk ellers engelsk) ──
-  const EN = { koble: 'Connect to your library', kobleTekst: 'Sign in in the browser — as you usually do (e-mail, Google or Microsoft) — and press “Connect” there. The app connects by itself. Nothing to copy.', loggInn: 'Sign in in the browser', avansert: 'Advanced: other address or key', adresse: 'Rawskap address', nokkel: 'Key (app key or API key)', kobleNokkel: 'Connect with key', hva: 'What to fetch?', hvaTekst: 'Pick a folder — subfolders come along and are recreated on disk. Files already there with the right size are skipped, and interrupted files resume where they stopped.', til: 'Download to', bla: 'Browse …', lastNed: '⤓ Download', parallell: 'Parallel streams:', avbryt: 'Cancel download', tilbake: '← Pick another folder', apne: 'Open folder', loggUt: 'Sign out',
-    lager: 'Creating code …', bekreft: 'Confirm the code in the browser …', koblet: 'Connected ✓', utlop: 'The code expired — try again.', forLang: 'Took too long — try again.', forrige: 'The previous connection no longer works — sign in again.', velgMaal: 'Download to', laster: 'Downloading …', ferdig: '✓ Done', feilet: 'failed', noenFeilet: 'Some files failed. Press “Download” again — they resume where they stopped.', stoppet: 'Stopped', venter: 'waiting', laDer: '✓ was there', ferdigKort: '✓ done', av: 'of', hele: 'Whole library', mapper: 'folders', filer: 'files' };
-  const NO = { lager: 'Lager kode …', bekreft: 'Bekreft koden i nettleseren …', koblet: 'Koblet ✓', utlop: 'Koden utløp — prøv igjen.', forLang: 'Tok for lang tid — prøv igjen.', forrige: 'Forrige kobling virker ikke lenger — logg inn på nytt.', velgMaal: 'Last ned til', laster: 'Laster ned …', ferdig: '✓ Ferdig', feilet: 'feilet', noenFeilet: 'Noen filer feilet. Trykk «Last ned» igjen — de fortsetter der de slapp.', stoppet: 'Stoppet', venter: 'venter', laDer: '✓ lå der', ferdigKort: '✓ ferdig', av: 'av', hele: 'Hele skapet', mapper: 'mapper', filer: 'filer' };
+  const EN = { koble: 'Connect to your library', kobleTekst: 'Sign in in the browser — as you usually do (e-mail, Google or Microsoft) — and press “Connect” there. The app connects by itself. Nothing to copy.', loggInn: 'Sign in in the browser', avansert: 'Advanced: other address or key', adresse: 'Rawskap address', nokkel: 'Key (app key or API key)', kobleNokkel: 'Connect with key', til: 'Download to', lastNedMappe: '⤓ Download folder', overforinger: 'Transfers', ingenOverf: 'No transfers', loggUt: 'Sign out', skrivLogg: 'Write log',
+    lager: 'Creating code …', bekreft: 'Confirm the code in the browser …', koblet: 'Connected ✓', utlop: 'The code expired — try again.', forLang: 'Took too long — try again.', forrige: 'The previous connection no longer works — sign in again.', velgMaal: 'Download to', hele: 'Whole library', mapper: 'folders', filer: 'files', fil: 'file', tomMappe: 'No files in this folder.', navn: 'Name', storrelse: 'Size', hent: 'Download', venter: 'waiting', laDer: 'was there', ferdig: 'done', feilet: 'failed', avbrutt: 'cancelled', iKo: 'queued', avbryt: 'Cancel', apneRawskap: 'Open in Rawskap', visUtforsker: 'Show in File Explorer', visLogg: 'Show log', fjern: 'Remove from list', provIgjen: 'Try again', velgMaalForst: 'Pick a download folder first' };
+  const NO = { til: 'Last ned til', lager: 'Lager kode …', bekreft: 'Bekreft koden i nettleseren …', koblet: 'Koblet ✓', utlop: 'Koden utløp — prøv igjen.', forLang: 'Tok for lang tid — prøv igjen.', forrige: 'Forrige kobling virker ikke lenger — logg inn på nytt.', velgMaal: 'Last ned til', hele: 'Hele skapet', mapper: 'mapper', filer: 'filer', fil: 'fil', tomMappe: 'Ingen filer i denne mappa.', navn: 'Navn', storrelse: 'Størrelse', hent: 'Last ned', venter: 'venter', laDer: 'lå der', ferdig: 'ferdig', feilet: 'feilet', avbrutt: 'avbrutt', iKo: 'i kø', avbryt: 'Avbryt', apneRawskap: 'Åpne i Rawskap', visUtforsker: 'Vis i Utforsker', visLogg: 'Vis logg', fjern: 'Fjern fra lista', provIgjen: 'Prøv igjen', velgMaalForst: 'Velg en nedlastingsmappe først', ingenOverf: 'Ingen overføringer' };
   const erNo = /^(nb|nn|no|da|sv)/i.test(navigator.language || '');
   const t = erNo ? NO : EN;
   if (!erNo) { document.getElementById('html').lang = 'en'; document.querySelectorAll('[data-t]').forEach(el => { const v = EN[el.dataset.t]; if (v) el.textContent = v; }); }
@@ -124,24 +150,27 @@
   const $ = id => document.getElementById(id);
   const fmt = b => b >= 1e9 ? `${(b/1e9).toFixed(2)} GB` : b >= 1e6 ? `${(b/1e6).toFixed(1)} MB` : `${Math.round(b/1e3)} kB`;
   const store = await load('transfer.json', { autoSave: true });
+  let portal = '', nokkel = '', data = null, valgtMappe = '', maal = '';
 
-  let portal = '', nokkel = '', data = null, valgtMappe = '', maal = '', filer = [];
+  await invoke('avbryt');
 
   // ── Kobling ──
   const lagret = await store.get('kobling');
   if (lagret?.nokkel) { $('portal').value = lagret.portal; $('nokkel').value = lagret.nokkel; }
-  if (await store.get('maal')) { maal = await store.get('maal'); $('maal').value = maal; }
+  maal = (await store.get('maal')) || '';
+  $('logg-bryter').checked = !!(await store.get('logg'));
+  $('logg-bryter').onchange = () => store.set('logg', $('logg-bryter').checked);
+  const visMaal = () => { $('maal-navn').textContent = maal ? maal.split(/[\\/]/).filter(Boolean).slice(-1)[0] : '…'; $('velg-maal').title = maal; };
+  visMaal();
   async function kobleMed(p, n) {
     portal = p.trim().replace(/\/$/, ''); nokkel = n.trim();
     data = await invoke('hent_liste', { portal, nokkel, mappe: '' });
     await store.set('kobling', { portal, nokkel });
     $('konto').textContent = `${data.mapper.length} ${t.mapper} · ${data.filer.length} ${t.filer} · ${fmt(data.totalBytes)}`;
-    $('koble-fra').classList.remove('skjult');
-    $('steg-kobling').classList.add('skjult'); $('steg-velg').classList.remove('skjult');
-    tegnTre();
+    $('logg-ut').classList.remove('skjult');
+    $('steg-kobling').classList.add('skjult'); $('skall').classList.remove('skjult'); $('overf').classList.remove('skjult');
+    tegnTre(); velgMappe('');
   }
-  // Device-kobling: kode → nettleser → poll til nøkkelen kommer.
-  let pollStopp = false;
   $('logg-inn').onclick = async () => {
     const p = ($('portal').value || 'https://rawskap.no').trim().replace(/\/$/, '');
     $('logg-inn').disabled = true; $('kobling-status').textContent = t.lager;
@@ -151,8 +180,7 @@
       $('kode-visning').textContent = d.kode.slice(0, 3) + '-' + d.kode.slice(3); $('kode-visning').classList.remove('skjult');
       $('kobling-status').textContent = t.bekreft;
       openShell(p + (/rawskap\.no/.test(p) ? '/app' : '/rawskap/app') + '?kode=' + d.kode);
-      pollStopp = false;
-      for (let i = 0; i < 300 && !pollStopp; i++) {
+      for (let i = 0; i < 300; i++) {
         await new Promise(r => setTimeout(r, 2000));
         const s = await invoke('kobling_poll', { portal: p, kode: d.kode });
         if (s.ok && s.nokkel) { $('kobling-status').textContent = t.koblet; await kobleMed(p, s.nokkel); return; }
@@ -162,89 +190,107 @@
     } catch (e) { $('kobling-status').textContent = String(e.message || e); $('kode-visning').classList.add('skjult'); }
     finally { $('logg-inn').disabled = false; }
   };
-  $('koble').onclick = async () => {
-    $('kobling-feil').textContent = ''; $('koble').disabled = true;
-    try { await kobleMed($('portal').value, $('nokkel').value); } catch (e) { $('kobling-feil').textContent = String(e); }
-    finally { $('koble').disabled = false; }
-  };
-  // Koble fra = stopp ALLE jobber først (Rust-laget lever videre gjennom en reload).
-  $('koble-fra').onclick = async () => { await invoke('avbryt'); await new Promise(r => setTimeout(r, 400)); await store.delete('kobling'); location.reload(); };
-  await invoke('avbryt'); // oppstart/reload: ingen gjenglemt jobb skal fortsette uten UI
+  $('koble').onclick = async () => { $('kobling-feil').textContent = ''; $('koble').disabled = true; try { await kobleMed($('portal').value, $('nokkel').value); } catch (e) { $('kobling-feil').textContent = String(e); } finally { $('koble').disabled = false; } };
+  $('logg-ut').onclick = async () => { await invoke('avbryt'); await new Promise(r => setTimeout(r, 400)); await store.delete('kobling'); location.reload(); };
   if (lagret?.nokkel) { try { await kobleMed(lagret.portal, lagret.nokkel); } catch (e) { $('kobling-status').textContent = t.forrige; } }
 
-  // ── Mappetre ──
+  // ── Mappetre + filer ──
+  const mappeNavn = id => id ? (data.mapper.find(m => m.id === id)?.navn || '') : t.hele;
+  const underMapper = rot => { const forelder = new Map(data.mapper.map(m => [m.id, m.forelderId || ''])); const s = new Set(); for (const m of data.mapper) { let k = m.id, v = 0, treff = !rot; while (k && v++ < 30 && !treff) { if (k === rot) treff = true; k = forelder.get(k) || ''; } if (treff) s.add(m.id); } return s; };
   function tegnTre() {
     const tre = $('tre'); tre.innerHTML = '';
     const barnAv = id => data.mapper.filter(m => (m.forelderId || '') === id).sort((a, b) => a.navn.localeCompare(b.navn, 'nb'));
-    const telling = new Map();
-    for (const f of data.filer) { telling.set(f.mappeId || '', (telling.get(f.mappeId || '') || 0) + 1); }
+    const antall = new Map(); for (const f of data.filer) antall.set(f.mappeId || '', (antall.get(f.mappeId || '') || 0) + 1);
     const rad = (id, navn, dybde) => {
-      const b = document.createElement('button');
-      b.className = `dybde${Math.min(dybde, 4)}` + (id === valgtMappe ? ' valgt' : '');
-      b.innerHTML = `<span>${dybde === 0 ? '🗄' : '📁'}</span><span>${navn}</span>`;
-      b.onclick = () => { valgtMappe = id; tegnTre(); velgFiler(); };
+      const b = document.createElement('button'); b.className = `dybde${Math.min(dybde, 4)}` + (id === valgtMappe ? ' valgt' : '');
+      const n = id ? antall.get(id) || 0 : data.filer.length;
+      b.innerHTML = `<span>${dybde === 0 ? '🗄' : '📁'}</span><span style="overflow:hidden;text-overflow:ellipsis">${navn}</span>${n ? `<small>${n}</small>` : ''}`;
+      b.onclick = () => velgMappe(id);
       tre.appendChild(b);
       for (const m of barnAv(id)) rad(m.id, m.navn, dybde + 1);
     };
     rad('', t.hele, 0);
   }
-  async function velgFiler() {
-    const under = new Set();
-    const forelder = new Map(data.mapper.map(m => [m.id, m.forelderId || '']));
-    const erUnder = id => { let k = id, v = 0; while (k && v++ < 30) { if (k === valgtMappe) return true; k = forelder.get(k) || ''; } return !valgtMappe; };
-    for (const m of data.mapper) if (erUnder(m.id)) under.add(m.id);
-    // Stier relativt til valgt mappe regnes av portalen — hent lista på nytt for mappa.
-    const d = await invoke('hent_liste', { portal, nokkel, mappe: valgtMappe });
-    filer = d.filer;
-    $('oppsummering').textContent = `${filer.length} ${t.filer} · ${fmt(d.totalBytes)}`;
-    $('start').disabled = !filer.length || !maal;
+  function velgMappe(id) {
+    valgtMappe = id; tegnTre();
+    const under = underMapper(id);
+    const filer = data.filer.filter(f => id ? under.has(f.mappeId) : true);
+    $('mappe-tittel').textContent = mappeNavn(id);
+    $('mappe-meta').textContent = `${filer.length} ${filer.length === 1 ? t.fil : t.filer} · ${fmt(filer.reduce((s, f) => s + f.bytes, 0))}`;
+    const el = $('filer'); el.innerHTML = '';
+    if (!filer.length) { el.innerHTML = `<div class="tom">${t.tomMappe}</div>`; return; }
+    el.innerHTML = `<div class="filrad hode"><span>${t.navn}</span><span class="tall">${t.storrelse}</span><span></span></div>`;
+    const navnAv = new Map(data.mapper.map(m => [m.id, m.navn]));
+    for (const f of filer.slice(0, 2000)) {
+      const r = document.createElement('div'); r.className = 'filrad';
+      r.innerHTML = `<span class="navn" title="${f.filnavn}">${f.filnavn}${id !== f.mappeId && f.mappeId ? `<small>${navnAv.get(f.mappeId) || ''}</small>` : ''}</span><span class="tall">${fmt(f.bytes)}</span><span class="hent"><button class="btn liten">⤓ ${t.hent}</button></span>`;
+      r.querySelector('button').onclick = () => startJobb(f.filnavn, [{ ...f, sti: '' }], f.mappeId, false);
+      el.appendChild(r);
+    }
   }
-  $('velg-maal').onclick = async () => {
-    const v = await open({ directory: true, multiple: false, title: t.velgMaal });
-    if (v) { maal = v; $('maal').value = v; await store.set('maal', v); $('start').disabled = !filer.length; }
-  };
+  $('velg-maal').onclick = async () => { const v = await open({ directory: true, multiple: false, title: t.velgMaal }); if (v) { maal = v; await store.set('maal', v); visMaal(); } };
+  $('last-ned-mappe').onclick = async () => { const d = await invoke('hent_liste', { portal, nokkel, mappe: valgtMappe }); startJobb(mappeNavn(valgtMappe), d.filer, valgtMappe, true); };
 
-  // ── Nedlasting ──
-  const tilstand = new Map();
-  let totalBytes = 0;
-  function tegnFil(f) {
-    const el = document.createElement('div'); el.className = 'fil'; el.id = 'f-' + f.id;
-    el.innerHTML = `<div class="navn" title="${f.filnavn}">${f.filnavn}<div class="sti">${f.sti || ''}</div></div><div class="bar"><i></i></div><div class="status">${t.venter}</div>`;
-    $('liste').appendChild(el);
+  // ── Overføringer: jobbkø, én jobb om gangen (3 strømmer) ──
+  const jobber = []; let aktiv = null;
+  const filTilstand = new Map();
+  $('overf-linje').onclick = () => $('overf').classList.toggle('åpen');
+  document.addEventListener('click', e => { if (!e.target.closest('.meny') && !e.target.closest('.meny-knapp')) document.querySelectorAll('.meny.åpen').forEach(m => m.classList.remove('åpen')); });
+  function startJobb(navn, filer, mappeId, erMappe) {
+    if (!maal) { $('overf').classList.add('åpen'); $('overf-tekst').textContent = t.velgMaalForst; $('velg-maal').click(); return; }
+    const j = { id: 'j' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), navn, mappeId, filer: filer.map(f => ({ id: f.id, filnavn: f.filnavn, bytes: f.bytes, sti: f.sti || '' })), maal: erMappe && mappeId ? `${maal}/${navn.replace(/[\\/:*?"<>|]+/g, '_')}` : maal, status: 'kø', ok: 0, feil: [], logg: $('logg-bryter').checked };
+    jobber.unshift(j); tegnJobber(); $('overf').classList.add('åpen'); kjørNeste();
   }
-  function oppdaterTotal() {
-    let hentet = 0, ferdig = 0, feil = 0;
-    for (const f of filer) { const t = tilstand.get(f.id); if (!t) continue; hentet += t.status === 'ferdig' || t.status === 'hoppet' ? f.bytes : t.hentet; if (t.status === 'ferdig' || t.status === 'hoppet') ferdig++; if (t.status === 'feil') feil++; }
-    $('total-bar').style.width = totalBytes ? `${Math.min(100, hentet / totalBytes * 100)}%` : '0%';
-    $('total-tekst').textContent = `${ferdig} ${t.av} ${filer.length} · ${fmt(hentet)} / ${fmt(totalBytes)}${feil ? ` · ${feil} ${t.feilet}` : ''}`;
+  async function kjørNeste() {
+    if (aktiv) return;
+    const j = jobber.find(x => x.status === 'kø'); if (!j) { oppdaterLinje(); return; }
+    aktiv = j; j.status = 'laster'; tegnJobber();
+    try {
+      const res = await invoke('last_ned', { portal, nokkel, filer: j.filer, maal: j.maal, parallell: 3, logg: j.logg, jobbnavn: j.navn });
+      j.ok = res.ok; j.feil = res.feil || [];
+      j.status = j.feil.some(f => /^Avbrutt$/i.test(f.feil || '')) ? 'avbrutt' : j.feil.length ? 'feil' : 'ferdig';
+    } catch (e) { j.status = 'feil'; j.feil = [{ feil: String(e) }]; }
+    aktiv = null; tegnJobber(); kjørNeste();
   }
   await listen('framdrift', ev => {
-    const p = ev.payload; tilstand.set(p.id, p);
-    const el = $('f-' + p.id); if (!el) return;
-    el.className = 'fil ' + p.status;
-    const pst = p.total ? Math.min(100, p.hentet / p.total * 100) : 0;
-    el.querySelector('.bar i').style.width = p.status === 'ferdig' || p.status === 'hoppet' ? '100%' : `${pst}%`;
-    el.querySelector('.status').textContent = p.status === 'ferdig' ? t.ferdigKort : p.status === 'hoppet' ? t.laDer : p.status === 'feil' ? '✕ ' + (p.feil || 'feil') : `${fmt(p.hentet)} / ${fmt(p.total)}`;
-    if (p.status === 'feil') el.title = p.feil || '';
-    oppdaterTotal();
+    const p = ev.payload; filTilstand.set(p.id, p);
+    const el = document.getElementById('f-' + p.id);
+    if (el) { el.className = 'fil ' + p.status; el.querySelector('.bar i').style.width = p.status === 'ferdig' || p.status === 'hoppet' ? '100%' : `${p.total ? Math.min(100, p.hentet / p.total * 100) : 0}%`; el.querySelector('.status').textContent = p.status === 'ferdig' ? `✓ ${t.ferdig}` : p.status === 'hoppet' ? `✓ ${t.laDer}` : p.status === 'feil' ? `✕ ${p.feil || t.feilet}` : `${fmt(p.hentet)} / ${fmt(p.total)}`; }
+    oppdaterJobbBar(); oppdaterLinje();
   });
-  $('start').onclick = async () => {
-    $('steg-velg').classList.add('skjult'); $('steg-laster').classList.remove('skjult');
-    $('liste').innerHTML = ''; tilstand.clear(); $('feil-oppsummering').classList.add('skjult');
-    totalBytes = filer.reduce((s, f) => s + f.bytes, 0);
-    for (const f of filer) tegnFil(f);
-    $('laster-tittel').textContent = t.laster; $('avbryt').disabled = false;
-    oppdaterTotal();
-    try {
-      const res = await invoke('last_ned', { portal, nokkel, filer: filer.map(f => ({ id: f.id, filnavn: f.filnavn, bytes: f.bytes, sti: f.sti })), maal, parallell: 3 });
-      $('laster-tittel').textContent = res.feil.length ? `${t.ferdig} — ${res.ok} ok, ${res.feil.length} ${t.feilet}` : `${t.ferdig} — ${res.ok} ${t.filer}`;
-      if (res.feil.length) { $('feil-oppsummering').textContent = t.noenFeilet; $('feil-oppsummering').classList.remove('skjult'); }
-    } catch (e) { $('laster-tittel').textContent = t.stoppet; $('feil-oppsummering').textContent = String(e); $('feil-oppsummering').classList.remove('skjult'); }
-    $('avbryt').disabled = true;
-  };
-  $('avbryt').onclick = () => invoke('avbryt');
-  $('tilbake').onclick = () => { $('steg-laster').classList.add('skjult'); $('steg-velg').classList.remove('skjult'); };
-  $('apne-mappe').onclick = () => { if (maal) openShell(maal); };
+  const jobbTall = j => { let hentet = 0, ferdig = 0; const total = j.filer.reduce((s, f) => s + f.bytes, 0); for (const f of j.filer) { const s = filTilstand.get(f.id); if (!s) continue; if (s.status === 'ferdig' || s.status === 'hoppet') { hentet += f.bytes; ferdig++; } else if (s.status !== 'feil') hentet += s.hentet; } return { hentet, total, ferdig }; };
+  function oppdaterJobbBar() { if (!aktiv) return; const el = document.getElementById('jb-' + aktiv.id); if (!el) return; const k = jobbTall(aktiv); el.querySelector('.bar i').style.width = k.total ? `${Math.min(100, k.hentet / k.total * 100)}%` : '0%'; el.querySelector('.status').textContent = `${k.ferdig} / ${aktiv.filer.length} · ${fmt(k.hentet)} / ${fmt(k.total)}`; }
+  function oppdaterLinje() {
+    if (aktiv) { const k = jobbTall(aktiv); $('overf-bar').style.width = k.total ? `${Math.min(100, k.hentet / k.total * 100)}%` : '0%'; const kø = jobber.filter(j => j.status === 'kø').length; $('overf-tekst').textContent = `${aktiv.navn} · ${fmt(k.hentet)} / ${fmt(k.total)}${kø ? ` · +${kø} ${t.iKo}` : ''}`; }
+    else { $('overf-bar').style.width = jobber.length ? '100%' : '0%'; const f = jobber.filter(j => j.status === 'ferdig').length; $('overf-tekst').textContent = jobber.length ? `${f} ${t.ferdig}${jobber.length - f ? ` · ${jobber.length - f} ${t.feilet}/${t.avbrutt}` : ''}` : t.ingenOverf; }
+  }
+  function tegnJobber() {
+    const p = $('overf-panel'); p.innerHTML = '';
+    for (const j of jobber) {
+      const el = document.createElement('div'); el.className = 'jobb' + (j === aktiv ? ' åpen' : ''); el.id = 'jb-' + j.id;
+      const k = jobbTall(j);
+      const statusTekst = j.status === 'kø' ? t.iKo : j.status === 'laster' ? `${k.ferdig} / ${j.filer.length} · ${fmt(k.hentet)} / ${fmt(k.total)}` : j.status === 'ferdig' ? `✓ ${t.ferdig} · ${fmt(k.total)}` : j.status === 'avbrutt' ? t.avbrutt : `${j.ok} ok · ${j.feil.length} ${t.feilet}`;
+      el.innerHTML = `<div class="jobb-hode"><span class="navn">${j.navn}<small>${j.filer.length} ${j.filer.length === 1 ? t.fil : t.filer}</small></span><div class="bar"><i style="width:${j.status === 'ferdig' ? 100 : k.total ? Math.min(100, k.hentet / k.total * 100) : 0}%"></i></div><span class="status">${statusTekst}</span><span class="rad"></span></div><div class="jobb-filer"></div>`;
+      const rad = el.querySelector('.rad');
+      const knapp = (tekst, cls, fn) => { const b = document.createElement('button'); b.className = 'btn liten ' + (cls || ''); b.textContent = tekst; b.onclick = e => { e.stopPropagation(); fn(); }; rad.appendChild(b); return b; };
+      if (j.status === 'laster') knapp(t.avbryt, 'farlig', () => invoke('avbryt'));
+      if (j.status === 'feil' || j.status === 'avbrutt') knapp(t.provIgjen, 'primær', () => { j.status = 'kø'; j.feil = []; tegnJobber(); kjørNeste(); });
+      // ⋯-meny (Frame.io-inspo): Åpne i Rawskap · Vis i Utforsker · Vis logg · Fjern
+      const mk = knapp('⋯', 'meny-knapp', () => { const m = el.querySelector('.meny'); const var_ = m.classList.contains('åpen'); document.querySelectorAll('.meny.åpen').forEach(x => x.classList.remove('åpen')); if (!var_) m.classList.add('åpen'); });
+      const meny = document.createElement('div'); meny.className = 'meny';
+      const mi = (tekst, fn) => { const b = document.createElement('button'); b.textContent = tekst; b.onclick = e => { e.stopPropagation(); meny.classList.remove('åpen'); fn(); }; meny.appendChild(b); };
+      mi(t.apneRawskap, () => openShell(portal + (/rawskap\.no/.test(portal) ? '' : '/rawskap') + (j.mappeId ? `?mappe=${j.mappeId}` : '')));
+      mi(t.visUtforsker, () => openShell(j.maal));
+      if (j.logg) mi(t.visLogg, () => openShell(j.maal));
+      if (j.status !== 'laster') { meny.appendChild(document.createElement('hr')); mi(t.fjern, () => { jobber.splice(jobber.indexOf(j), 1); tegnJobber(); oppdaterLinje(); }); }
+      rad.appendChild(meny);
+      el.querySelector('.jobb-hode').onclick = e => { if (e.target.closest('.rad')) return; el.classList.toggle('åpen'); };
+      const liste = el.querySelector('.jobb-filer');
+      for (const f of j.filer.slice(0, 500)) { const s = filTilstand.get(f.id); const r = document.createElement('div'); r.className = 'fil ' + (s?.status || ''); r.id = 'f-' + f.id; r.innerHTML = `<span class="navn" title="${f.sti ? f.sti + '/' : ''}${f.filnavn}">${f.filnavn}</span><div class="bar"><i style="width:${s ? (s.status === 'ferdig' || s.status === 'hoppet' ? 100 : s.total ? Math.min(100, s.hentet / s.total * 100) : 0) : 0}%"></i></div><span class="status">${s ? (s.status === 'ferdig' ? `✓ ${t.ferdig}` : s.status === 'hoppet' ? `✓ ${t.laDer}` : s.status === 'feil' ? `✕ ${s.feil || t.feilet}` : `${fmt(s.hentet)} / ${fmt(s.total)}`) : t.venter}</span>`; liste.appendChild(r); }
+      p.appendChild(el);
+    }
+    oppdaterLinje();
+  }
 </script>
 </body>
 </html>
