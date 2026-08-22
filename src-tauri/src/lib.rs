@@ -347,16 +347,22 @@ async fn video_info(app: &AppHandle, sti: &str) -> VideoInfo {
     let (w, h) = parse_dim(&err); v.bredde = w; v.hoyde = h;
     // Poster: midten, men maks 5 s inn (som nettleseren). Maks 1280 bred.
     let t = if v.varighet > 0.0 { (v.varighet / 2.0).min(5.0) } else { 1.0 };
-    if let Ok((png, _)) = ffmpeg_ut(app, &["-hide_banner".into(), "-loglevel".into(), "error".into(), "-ss".into(), format!("{t:.2}"), "-i".into(), sti.into(), "-frames:v".into(), "1".into(), "-vf".into(), "scale='min(1280,iw)':-2".into(), "-q:v".into(), "4".into(), "-f".into(), "image2".into(), "-c:v".into(), "mjpeg".into(), "-".into()]).await {
-        if png.len() > 1000 { v.poster = Some(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(&png))); }
+    // Binær ut via stdout ødelegges av shell-pluginens tekstbehandling (22/8:
+    // «glitch-poster») — skriv til temp-fil og les den.
+    let tmp = std::env::temp_dir().join(format!("rawskap-poster-{}.jpg", std::process::id()));
+    if ffmpeg_ut(app, &["-hide_banner".into(), "-loglevel".into(), "error".into(), "-y".into(), "-ss".into(), format!("{t:.2}"), "-i".into(), sti.into(), "-frames:v".into(), "1".into(), "-vf".into(), "scale='min(1280,iw)':-2".into(), "-q:v".into(), "4".into(), tmp.to_string_lossy().to_string()]).await.is_ok() {
+        if let Ok(jpg) = tokio::fs::read(&tmp).await { if jpg.len() > 1000 { v.poster = Some(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(&jpg))); } }
+        let _ = tokio::fs::remove_file(&tmp).await;
     }
     // Sprite: N = clamp(round(dur), 12, 48) frames jevnt fordelt, 200 px høye, vannrett stripe.
     if v.varighet > 0.5 {
         let n = (v.varighet.round() as u32).clamp(12, 48);
         let fps = n as f64 / v.varighet;
         let vf = format!("fps={fps:.6},scale=-2:200,tile={n}x1");
-        if let Ok((jpg, _)) = ffmpeg_ut(app, &["-hide_banner".into(), "-loglevel".into(), "error".into(), "-i".into(), sti.into(), "-vf".into(), vf, "-frames:v".into(), "1".into(), "-q:v".into(), "5".into(), "-f".into(), "image2".into(), "-c:v".into(), "mjpeg".into(), "-".into()]).await {
-            if jpg.len() > 1000 { v.sprite = Some(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(&jpg))); v.frames = n; }
+        let tmp = std::env::temp_dir().join(format!("rawskap-sprite-{}.jpg", std::process::id()));
+        if ffmpeg_ut(app, &["-hide_banner".into(), "-loglevel".into(), "error".into(), "-y".into(), "-i".into(), sti.into(), "-vf".into(), vf, "-frames:v".into(), "1".into(), "-q:v".into(), "5".into(), tmp.to_string_lossy().to_string()]).await.is_ok() {
+            if let Ok(jpg) = tokio::fs::read(&tmp).await { if jpg.len() > 1000 { v.sprite = Some(format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(&jpg))); v.frames = n; } }
+            let _ = tokio::fs::remove_file(&tmp).await;
         }
     }
     v
