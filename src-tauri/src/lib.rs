@@ -387,19 +387,23 @@ async fn sikre_mappe(k: &reqwest::Client, portal: &str, rot: &str, relativ_dir: 
 }
 
 /// Fil → byte-strøm m/ teller (PUT-framdrift).
-fn fil_strom(f: tokio::fs::File, struper: Arc<Struper>, mut tell: impl FnMut(u64) + Send + 'static) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
+fn fil_strom(f: tokio::fs::File, struper: Arc<Struper>, avbryt: Arc<AtomicBool>, mut tell: impl FnMut(u64) + Send + 'static) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
     use tokio::io::AsyncReadExt;
-    futures_util::stream::unfold((f, struper), |(mut f, struper)| async move {
+    futures_util::stream::unfold((f, struper, avbryt), |(mut f, struper, avbryt)| async move {
+        // Avbryt MIDT i en PUT (22/8-bug: en gjenglemt opplasting levde videre etter
+        // reload og rapporterte til samme rad som den nye) — kutt strømmen, så
+        // feiler PUT-en og opprydding (action avbryt) kjører.
+        if avbryt.load(Ordering::Relaxed) { return Some((Err(std::io::Error::other("Avbrutt")), (f, struper, avbryt))); }
         let mut buf = vec![0u8; 1 << 20];
         match f.read(&mut buf).await {
             Ok(0) => None,
-            Ok(n) => { buf.truncate(n); struper.tell(n as u64).await; Some((Ok(bytes::Bytes::from(buf)), (f, struper))) }
-            Err(e) => Some((Err(e), (f, struper))),
+            Ok(n) => { buf.truncate(n); struper.tell(n as u64).await; Some((Ok(bytes::Bytes::from(buf)), (f, struper, avbryt))) }
+            Err(e) => Some((Err(e), (f, struper, avbryt))),
         }
     }).inspect(move |r| { if let Ok(b) = r { tell(b.len() as u64); } })
 }
 
-async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &AtomicBool, struper: Arc<Struper>) -> Result<(), String> {
+async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &Arc<AtomicBool>, struper: Arc<Struper>) -> Result<(), String> {
     let navn = std::path::Path::new(&fil.sti).file_name().and_then(|n| n.to_str()).unwrap_or("fil").to_string();
     let mime = mime_fra(&navn);
     let meta = tokio::fs::metadata(&fil.sti).await.map_err(|e| format!("{e}"))?;
@@ -417,13 +421,18 @@ async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Clien
     let id = fil.sti.clone(); let app2 = app.clone();
     let sendt = Arc::new(AtomicU64::new(0)); let sendt2 = sendt.clone();
     let mut sist_meldt = std::time::Instant::now();
-    let strom = fil_strom(f, struper, move |n| {
+    let strom = fil_strom(f, struper, avbryt.clone(), move |n| {
         let t = sendt2.fetch_add(n, Ordering::Relaxed) + n;
         if sist_meldt.elapsed().as_millis() > 150 || t == bytes { sist_meldt = std::time::Instant::now(); let _ = app2.emit("framdrift", Framdrift { id: id.clone(), hentet: t, total: bytes, status: "laster".into(), feil: None }); }
     });
-    let resp = bare.put(&url).header(reqwest::header::CONTENT_TYPE, mime).header(reqwest::header::CONTENT_LENGTH, bytes).body(reqwest::Body::wrap_stream(strom)).send().await.map_err(|e| format!("{e}"))?;
+    let resp = bare.put(&url).header(reqwest::header::CONTENT_TYPE, mime).header(reqwest::header::CONTENT_LENGTH, bytes).body(reqwest::Body::wrap_stream(strom)).send().await;
+    if avbryt.load(Ordering::Relaxed) || resp.is_err() && avbryt.load(Ordering::Relaxed) {
+        let _ = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "avbryt", "originalKeys": [key] })).send().await;
+        return Err("Avbrutt".into());
+    }
+    let resp = resp.map_err(|e| format!("{e}"))?;
     if !resp.status().is_success() { return Err(format!("Lageret svarte {}", resp.status())); }
-    if avbryt.load(Ordering::Relaxed) {
+    if false {
         let _ = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "avbryt", "originalKeys": [key] })).send().await;
         return Err("Avbrutt".into());
     }
