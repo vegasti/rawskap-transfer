@@ -344,7 +344,6 @@
   };
   $('koble').onclick = async () => { $('kobling-feil').textContent = ''; $('koble').disabled = true; try { await kobleMed($('portal').value, $('nokkel').value); } catch (e) { $('kobling-feil').textContent = String(e); } finally { $('koble').disabled = false; } };
   $('logg-ut').onclick = async () => { await invoke('avbryt'); await new Promise(r => setTimeout(r, 400)); await store.delete('kobling'); location.reload(); };
-  if (lagret?.nokkel) { try { await kobleMed(lagret.portal, lagret.nokkel); } catch (e) { $('kobling-status').textContent = t.forrige; } }
 
   // ── Egen prompt (aldri nativ) ──
   function spor(tittel, tekst, plassholder) {
@@ -584,6 +583,8 @@
     }
     oppdaterLinje();
   }
+  // Auto-kobling SIST (22/8-lærepenge ×2): alt over må være definert før kobleMed tegner skapet.
+  if (lagret?.nokkel) { try { await kobleMed(lagret.portal, lagret.nokkel); } catch (e) { $('kobling-status').textContent = t.forrige; } }
 </script>
 </body>
 </html>
