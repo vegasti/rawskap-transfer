@@ -58,15 +58,23 @@
   <!-- Steg 1: kobling -->
   <section id="steg-kobling" class="kort">
     <h2>Koble til skapet</h2>
-    <p>Bruk en API-nøkkel fra Innstillinger → API (<code>rsk_live_…</code>, kan trekkes tilbake når som helst) — eller lag en app-nøkkel på <a href="#" id="apne-portal">rawskap.no/app</a>. Nøkkelen ligger bare på denne maskinen.</p>
-    <label>Rawskap-adresse</label>
-    <input type="text" id="portal" value="https://rawskap.no" />
-    <label>App-nøkkel</label>
-    <input type="password" id="nokkel" placeholder="lim inn nøkkelen …" />
-    <div class="rad" style="margin-top:12px">
-      <button class="btn primær" id="koble">Koble til</button>
-      <span id="kobling-feil" class="hjelp"></span>
+    <p>Logg inn i nettleseren — slik du pleier (e-post, Google eller Microsoft) — og trykk «Koble til» der. Appen kobles automatisk. Ingenting å kopiere.</p>
+    <div class="rad">
+      <button class="btn primær" id="logg-inn">Logg inn i nettleseren</button>
+      <span id="kode-visning" class="skjult" style="font-family:ui-monospace,monospace;font-size:22px;letter-spacing:.15em;font-weight:700"></span>
+      <span id="kobling-status" class="hjelp"></span>
     </div>
+    <details style="margin-top:16px">
+      <summary class="hjelp" style="cursor:pointer">Avansert: annen adresse eller nøkkel</summary>
+      <label>Rawskap-adresse</label>
+      <input type="text" id="portal" value="https://rawskap.no" />
+      <label>Nøkkel (app-nøkkel eller API-nøkkel)</label>
+      <input type="password" id="nokkel" placeholder="lim inn nøkkelen …" />
+      <div class="rad" style="margin-top:12px">
+        <button class="btn" id="koble">Koble til med nøkkel</button>
+        <span id="kobling-feil" class="hjelp"></span>
+      </div>
+    </details>
   </section>
 
   <!-- Steg 2: velg mappe -->
@@ -116,22 +124,44 @@
   const lagret = await store.get('kobling');
   if (lagret?.nokkel) { $('portal').value = lagret.portal; $('nokkel').value = lagret.nokkel; }
   if (await store.get('maal')) { maal = await store.get('maal'); $('maal').value = maal; }
-  $('apne-portal').onclick = e => { e.preventDefault(); openShell(($('portal').value || 'https://rawskap.no').replace(/\/$/, '') + (/rawskap\.no/.test($('portal').value) ? '/app' : '/rawskap/app')); };
-  $('koble').onclick = async () => {
-    portal = $('portal').value.trim().replace(/\/$/, ''); nokkel = $('nokkel').value.trim();
-    $('kobling-feil').textContent = ''; $('koble').disabled = true; $('koble').textContent = 'Kobler …';
+  async function kobleMed(p, n) {
+    portal = p.trim().replace(/\/$/, ''); nokkel = n.trim();
+    data = await invoke('hent_liste', { portal, nokkel, mappe: '' });
+    await store.set('kobling', { portal, nokkel });
+    $('konto').textContent = `${data.mapper.length} mapper · ${data.filer.length} filer · ${fmt(data.totalBytes)}`;
+    $('koble-fra').classList.remove('skjult');
+    $('steg-kobling').classList.add('skjult'); $('steg-velg').classList.remove('skjult');
+    tegnTre();
+  }
+  // Device-kobling: kode → nettleser → poll til nøkkelen kommer.
+  let pollStopp = false;
+  $('logg-inn').onclick = async () => {
+    const p = ($('portal').value || 'https://rawskap.no').trim().replace(/\/$/, '');
+    $('logg-inn').disabled = true; $('kobling-status').textContent = 'Lager kode …';
     try {
-      data = await invoke('hent_liste', { portal, nokkel, mappe: '' });
-      await store.set('kobling', { portal, nokkel });
-      $('konto').textContent = `${data.mapper.length} mapper · ${data.filer.length} filer · ${fmt(data.totalBytes)}`;
-      $('koble-fra').classList.remove('skjult');
-      $('steg-kobling').classList.add('skjult'); $('steg-velg').classList.remove('skjult');
-      tegnTre();
-    } catch (e) { $('kobling-feil').textContent = String(e); }
-    finally { $('koble').disabled = false; $('koble').textContent = 'Koble til'; }
+      const r = await fetch(p + '/api/rawskap/transfer/kobling', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ maskin: navigator.platform || 'denne maskinen' }) });
+      const d = await r.json(); if (!d.ok) throw new Error(d.error || 'Kunne ikke lage kode');
+      $('kode-visning').textContent = d.kode.slice(0, 3) + '-' + d.kode.slice(3); $('kode-visning').classList.remove('skjult');
+      $('kobling-status').textContent = 'Bekreft koden i nettleseren …';
+      openShell(p + (/rawskap\.no/.test(p) ? '/app' : '/rawskap/app') + '?kode=' + d.kode);
+      pollStopp = false;
+      for (let i = 0; i < 300 && !pollStopp; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        const s = await (await fetch(p + '/api/rawskap/transfer/kobling?kode=' + d.kode)).json();
+        if (s.ok && s.nokkel) { $('kobling-status').textContent = 'Koblet ✓'; await kobleMed(p, s.nokkel); return; }
+        if (s.utlopt) throw new Error('Koden utløp — prøv igjen.');
+      }
+      throw new Error('Tok for lang tid — prøv igjen.');
+    } catch (e) { $('kobling-status').textContent = String(e.message || e); $('kode-visning').classList.add('skjult'); }
+    finally { $('logg-inn').disabled = false; }
+  };
+  $('koble').onclick = async () => {
+    $('kobling-feil').textContent = ''; $('koble').disabled = true;
+    try { await kobleMed($('portal').value, $('nokkel').value); } catch (e) { $('kobling-feil').textContent = String(e); }
+    finally { $('koble').disabled = false; }
   };
   $('koble-fra').onclick = async () => { await store.delete('kobling'); location.reload(); };
-  if (lagret?.nokkel) $('koble').click();
+  if (lagret?.nokkel) { try { await kobleMed(lagret.portal, lagret.nokkel); } catch (e) { $('kobling-status').textContent = 'Forrige kobling virker ikke lenger — logg inn på nytt.'; } }
 
   // ── Mappetre ──
   function tegnTre() {
