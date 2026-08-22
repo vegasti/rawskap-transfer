@@ -197,7 +197,7 @@
   const $ = id => document.getElementById(id);
   const fmt = b => b >= 1e9 ? `${(b/1e9).toFixed(2)} GB` : b >= 1e6 ? `${(b/1e6).toFixed(1)} MB` : `${Math.round(b/1e3)} kB`;
   const store = await load('transfer.json', { autoSave: true });
-  let portal = '', nokkel = '', data = null, valgtMappe = '', maal = '';
+  let portal = '', nokkel = '', data = null, valgtMappe = '', maal = '', visning = 'mappe';
 
   await invoke('avbryt');
 
@@ -301,7 +301,6 @@
     };
     rad('', t.hele, 0);
   }
-  let visning = 'mappe';
   function visOverfVisning(paa) {
     visning = paa ? 'overf' : 'mappe';
     $('visning-mappe').classList.toggle('skjult', paa); $('visning-overf').classList.toggle('åpen', paa);
