@@ -412,7 +412,7 @@
     const barnAv = id => data.mapper.filter(m => (m.forelderId || '') === id).sort((a, b) => a.navn.localeCompare(b.navn, 'nb'));
     const antall = new Map(); for (const f of data.filer) antall.set(f.mappeId || '', (antall.get(f.mappeId || '') || 0) + 1);
     const rad = (id, navn, dybde) => {
-      const b = document.createElement('button'); b.className = `dybde${Math.min(dybde, 4)}` + (id === valgtMappe && visning === 'mappe' ? ' valgt' : '');
+      const b = document.createElement('button'); b.className = (id === valgtMappe && visning === 'mappe' ? 'valgt' : ''); b.style.paddingLeft = `${9 + dybde * 16}px`; // ubegrenset dybde
       const n = id ? antall.get(id) || 0 : data.filer.length;
       const barn = barnAv(id); const erLukket = id && lukket.has(id);
       b.innerHTML = `<span class="trekant${barn.length ? '' : ' uten'}">${barn.length ? (erLukket ? '▶' : '▼') : ''}</span><span>${dybde === 0 ? '🗄' : '📁'}</span><span class="navn">${navn}</span><small>${n || ''}</small>`;
