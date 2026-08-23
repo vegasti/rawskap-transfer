@@ -22,12 +22,13 @@
   aside .bunn button:hover { background:rgba(50,95,78,.1); }
   aside .bunn button.valgt { background:var(--grønn); color:#f5f0eb; }
   aside .bunn small { margin-left:auto; font-size:11px; opacity:.75; background:rgba(0,0,0,.15); padding:1px 7px; border-radius:999px; }
-  aside .tre button { width:100%; text-align:left; background:none; border:none; color:inherit; font:inherit; padding:6px 9px; border-radius:6px; cursor:pointer; display:flex; gap:8px; align-items:center; white-space:nowrap; }
+  aside .tre button { width:100%; box-sizing:border-box; text-align:left; background:none; border:none; color:inherit; font:inherit; padding:6px 9px; border-radius:6px; cursor:pointer; display:grid; grid-template-columns:14px 20px minmax(0,1fr) auto; column-gap:6px; align-items:center; white-space:nowrap; min-height:32px; }
+  aside .tre button > .navn { min-width:0; overflow:hidden; text-overflow:ellipsis; }
   aside .tre button:hover { background:rgba(50,95,78,.1); }
   aside .tre button.valgt { background:var(--grønn); color:#f5f0eb; }
   aside .tre .dybde1 { padding-left:26px; } aside .tre .dybde2 { padding-left:42px; } aside .tre .dybde3 { padding-left:58px; } aside .tre .dybde4 { padding-left:74px; }
-  aside .tre small { margin-left:auto; font-size:11px; opacity:.6; }
-  aside .tre .trekant { display:inline-block; width:14px; min-width:14px; height:14px; line-height:14px; text-align:center; font-size:9px; opacity:.55; cursor:pointer; user-select:none; }
+  aside .tre small { font-size:11px; opacity:.6; justify-self:end; }
+  aside .tre .trekant { text-align:center; font-size:9px; opacity:.55; cursor:pointer; user-select:none; }
   aside .tre .trekant:hover { opacity:1; }
   aside .tre .trekant.tom { cursor:default; opacity:0; }
   aside .oppdater { background:none; border:none; color:inherit; opacity:.6; cursor:pointer; font:inherit; font-size:14px; padding:4px 8px; }
@@ -414,7 +415,7 @@
       const b = document.createElement('button'); b.className = `dybde${Math.min(dybde, 4)}` + (id === valgtMappe && visning === 'mappe' ? ' valgt' : '');
       const n = id ? antall.get(id) || 0 : data.filer.length;
       const barn = barnAv(id); const erLukket = id && lukket.has(id);
-      b.innerHTML = `<span class="trekant${barn.length ? '' : ' tom'}">${barn.length ? (erLukket ? '▶' : '▼') : ''}</span><span>${dybde === 0 ? '🗄' : '📁'}</span><span style="overflow:hidden;text-overflow:ellipsis">${navn}</span>${n ? `<small>${n}</small>` : ''}`;
+      b.innerHTML = `<span class="trekant${barn.length ? '' : ' tom'}">${barn.length ? (erLukket ? '▶' : '▼') : ''}</span><span>${dybde === 0 ? '🗄' : '📁'}</span><span class="navn">${navn}</span><small>${n || ''}</small>`;
       b.onclick = () => velgMappe(id);
       b.querySelector('.trekant').onclick = async e => { e.stopPropagation(); if (!barn.length) return; if (lukket.has(id)) lukket.delete(id); else lukket.add(id); await store.set('lukket', [...lukket]); tegnTre(); };
       b.oncontextmenu = e => mappeMeny(e, id);
