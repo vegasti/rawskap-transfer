@@ -630,7 +630,8 @@
         jobber.splice(jobber.indexOf(j), 1); j.status = 'kø'; j.feil = []; jobber.splice(jobber.indexOf(venter), 0, j); tegnJobber(); lagreKo();
       });
       mi(t.apneRawskap, () => openShell(portal + (/rawskap\.no/.test(portal) ? '' : '/rawskap') + (j.mappeId ? `?mappe=${j.mappeId}` : '')));
-      mi(t.visUtforsker, () => openShell(j.type === 'opp' ? j.filer[0].sti.replace(/[\\/][^\\/]+$/, '') : j.maal));
+      // Én fil → Utforsker med fila markert; ellers mappa (opp: kildemappa, ned: målmappa).
+      mi(t.visUtforsker, () => { const sti = j.type === 'opp' ? (j.filer.length === 1 ? j.filer[0].sti : j.filer[0].sti.replace(/[\\/][^\\/]+$/, '')) : (j.filer.length === 1 && j.status === 'ferdig' ? j.maal + '/' + j.filer[0].filnavn : j.maal); invoke('vis_i_utforsker', { sti }).catch(e => { $('overf-tekst').textContent = String(e); }); });
       if (j.logg && j.type !== 'opp') mi(t.visLogg, () => openShell(j.maal));
       if (j.status !== 'laster') { meny.appendChild(document.createElement('hr')); mi(t.fjern, () => { jobber.splice(jobber.indexOf(j), 1); tegnJobber(); lagreKo(); oppdaterLinje(); }); }
       rad.appendChild(meny);
