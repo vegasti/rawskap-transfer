@@ -746,6 +746,19 @@ async fn hent_deling(portal: String, token: String) -> Result<serde_json::Value,
     Ok(d)
 }
 
+/// Semantisk søk i skapet (samme motor som nettsøket) → [{id, score}].
+#[tauri::command]
+async fn sok(portal: String, nokkel: String, q: String) -> Result<serde_json::Value, String> {
+    let k = klient(&nokkel)?;
+    let r = k.get(format!("{}/api/rawskap/sok-semantisk?q={}", portal.trim_end_matches('/'), urlenc(&q))).send().await.map_err(|e| format!("{e}"))?;
+    let st = r.status().as_u16();
+    let d: serde_json::Value = r.json().await.map_err(|e| format!("{e}"))?;
+    if st == 503 { return Err("Søk i skapet er ikke satt opp på kontoen".into()); }
+    if !(200..300).contains(&st) { return Err(d["error"].as_str().unwrap_or("søket feilet").to_string()); }
+    Ok(d)
+}
+fn urlenc(s: &str) -> String { s.bytes().map(|b| match b { b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(), _ => format!("%{b:02X}") }).collect() }
+
 #[tauri::command]
 fn avbryt(tilstand: State<'_, Tilstand>) {
     tilstand.avbryt.store(true, Ordering::Relaxed);
@@ -799,7 +812,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
-        .invoke_handler(tauri::generate_handler![hent_liste, hent_deling, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
