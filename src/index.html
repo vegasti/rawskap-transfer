@@ -30,7 +30,7 @@
   aside .tre small { font-size:11px; opacity:.6; justify-self:end; }
   aside .tre .trekant { text-align:center; font-size:9px; opacity:.55; cursor:pointer; user-select:none; }
   aside .tre .trekant:hover { opacity:1; }
-  aside .tre .trekant.tom { cursor:default; opacity:0; }
+  aside .tre .trekant.uten { cursor:default; opacity:0; }
   aside .oppdater { background:none; border:none; color:inherit; opacity:.6; cursor:pointer; font:inherit; font-size:14px; padding:4px 8px; }
   aside .oppdater:hover { opacity:1; }
   aside .tre-hode { display:flex; align-items:center; justify-content:space-between; padding:6px 10px 2px; font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--svakere); font-weight:700; }
@@ -415,7 +415,7 @@
       const b = document.createElement('button'); b.className = `dybde${Math.min(dybde, 4)}` + (id === valgtMappe && visning === 'mappe' ? ' valgt' : '');
       const n = id ? antall.get(id) || 0 : data.filer.length;
       const barn = barnAv(id); const erLukket = id && lukket.has(id);
-      b.innerHTML = `<span class="trekant${barn.length ? '' : ' tom'}">${barn.length ? (erLukket ? '▶' : '▼') : ''}</span><span>${dybde === 0 ? '🗄' : '📁'}</span><span class="navn">${navn}</span><small>${n || ''}</small>`;
+      b.innerHTML = `<span class="trekant${barn.length ? '' : ' uten'}">${barn.length ? (erLukket ? '▶' : '▼') : ''}</span><span>${dybde === 0 ? '🗄' : '📁'}</span><span class="navn">${navn}</span><small>${n || ''}</small>`;
       b.onclick = () => velgMappe(id);
       b.querySelector('.trekant').onclick = async e => { e.stopPropagation(); if (!barn.length) return; if (lukket.has(id)) lukket.delete(id); else lukket.add(id); await store.set('lukket', [...lukket]); tegnTre(); };
       b.oncontextmenu = e => mappeMeny(e, id);
