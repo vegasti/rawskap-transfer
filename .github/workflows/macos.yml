@@ -1,0 +1,67 @@
+# macOS-BYGGET (24/8): GitHub sin Mac-runner bygger, signerer og notariserer
+# Rawskap Transfer helt uten at vi eier en Mac. Tauri leser APPLE_*-envene selv:
+# p12-en importeres i en midlertidig keychain, appen signeres med Developer ID,
+# og notarytool kjører med App Store Connect-API-nøkkelen (ingen 2FA i CI).
+# ffmpeg-sidecaren (statisk arm64, martin-riedl.de) lastes ned i CI — binærfiler
+# ligger ikke i repoet. Kjør manuelt (workflow_dispatch) eller tagg v*.
+name: macOS-bygg
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  bygg:
+    runs-on: macos-latest # arm64 (M-serien)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Rust-cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: ffmpeg-sidecar (statisk arm64)
+        run: |
+          curl -sfL -o ffmpeg.zip https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip
+          unzip -oq ffmpeg.zip -d ffdl
+          mkdir -p src-tauri/binaries
+          BIN=$(find ffdl -type f -name ffmpeg | head -1)
+          test -n "$BIN"
+          mv "$BIN" src-tauri/binaries/ffmpeg-aarch64-apple-darwin
+          chmod +x src-tauri/binaries/ffmpeg-aarch64-apple-darwin
+          src-tauri/binaries/ffmpeg-aarch64-apple-darwin -version | head -1
+
+      - run: npm ci
+
+      - name: API-nøkkel til fil (notarytool)
+        env:
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+        run: printf '%s' "$APPLE_API_KEY_CONTENT" > "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Bygg + signer + notariser
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+        run: npm run tauri build -- --bundles app,dmg
+
+      - name: Verifiser signatur
+        run: |
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' | head -1)
+          codesign -dv --verbose=2 "$APP" 2>&1 | grep -E 'Authority|TeamIdentifier|flags'
+          spctl -a -vv "$APP" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Rawskap-Transfer-macOS-arm64
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
