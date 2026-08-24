@@ -648,6 +648,29 @@ async fn slett_filer(portal: String, nokkel: String, ids: Vec<String>) -> Result
     Ok(())
 }
 
+/// «Vis i Utforsker» (23/8): shell.open nekter lokale stier (scope = URL-skjemaer),
+/// så vi åpner selv. Fil → Explorer med fila markert; mappe → mappa.
+#[tauri::command]
+fn vis_i_utforsker(sti: String) -> Result<(), String> {
+    let p = std::path::Path::new(&sti);
+    if !p.exists() { return Err("finnes ikke".into()); }
+    #[cfg(windows)]
+    {
+        let mut c = std::process::Command::new("explorer.exe");
+        if p.is_dir() { c.arg(&sti); } else { c.arg(format!("/select,{}", sti)); }
+        c.spawn().map_err(|e| format!("{e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut c = std::process::Command::new("open");
+        if p.is_dir() { c.arg(&sti); } else { c.arg("-R").arg(&sti); }
+        c.spawn().map_err(|e| format!("{e}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    { std::process::Command::new("xdg-open").arg(if p.is_dir() { p } else { p.parent().unwrap_or(p) }).spawn().map_err(|e| format!("{e}"))?; }
+    Ok(())
+}
+
 #[tauri::command]
 async fn er_mappe(sti: String) -> bool { tokio::fs::metadata(&sti).await.map(|m| m.is_dir()).unwrap_or(false) }
 
@@ -812,7 +835,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
-        .invoke_handler(tauri::generate_handler![hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
