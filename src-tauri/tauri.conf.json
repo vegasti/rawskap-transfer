@@ -40,7 +40,12 @@
     ],
     "externalBin": [
       "binaries/ffmpeg"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    }
   },
   "plugins": {
     "deep-link": {
