@@ -1,0 +1,36 @@
+# STAPLE (25/8): etter at Apple har notarisert (no-wait-innsendingen fra bygg),
+# heftes billetten fast i dmg-en — da virker Gatekeeper også OFFLINE.
+# Kjøres manuelt med run-id-en til bygget som lagde artifacten.
+name: Staple
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run-ID til bygget med macOS-artifacten'
+        required: true
+
+jobs:
+  staple:
+    runs-on: macos-latest
+    steps:
+      - name: Hent artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download ${{ inputs.run_id }} -R ${{ github.repository }} -n Rawskap-Transfer-macOS-arm64 -D dmg
+          find dmg -name '*.dmg'
+
+      - name: Staple + verifiser
+        run: |
+          DMG=$(find dmg -name '*.dmg' | head -1)
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          spctl -a -t open --context context:primary-signature -vv "$DMG" || true
+          mkdir ut && cp "$DMG" "ut/Rawskap-Transfer.dmg"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Rawskap-Transfer-macOS-arm64-stapled
+          path: ut/Rawskap-Transfer.dmg
+          if-no-files-found: error
