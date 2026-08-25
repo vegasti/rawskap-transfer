@@ -650,6 +650,18 @@ async fn slett_filer(portal: String, nokkel: String, ids: Vec<String>) -> Result
 
 /// «Vis i Utforsker» (23/8): shell.open nekter lokale stier (scope = URL-skjemaer),
 /// så vi åpner selv. Fil → Explorer med fila markert; mappe → mappa.
+/// Versjonssjekk (25/8): henter manifestet fra media-domenet — Rust-siden
+/// fordi webviewen ikke får CORS mot det. Returnerer rå JSON; JS sammenligner.
+#[tauri::command]
+async fn sjekk_versjon() -> Result<String, String> {
+    let r = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build().map_err(|e| format!("{e}"))?
+        .get("https://media.rawstudios.no/apper/transfer-versjon.json")
+        .send().await.map_err(|e| format!("{e}"))?;
+    r.text().await.map_err(|e| format!("{e}"))
+}
+
 #[tauri::command]
 fn vis_i_utforsker(sti: String) -> Result<(), String> {
     let p = std::path::Path::new(&sti);
@@ -835,7 +847,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
-        .invoke_handler(tauri::generate_handler![hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
