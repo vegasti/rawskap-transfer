@@ -278,6 +278,9 @@
   if (!erNo) { document.getElementById('html').lang = 'en'; document.querySelectorAll('[data-t]').forEach(el => { const v = EN[el.dataset.t]; if (v) el.textContent = v; }); document.querySelectorAll('[data-t-ph]').forEach(el => { const v = EN[el.dataset.tPh]; if (v) el.placeholder = v; }); }
 
   const $ = id => document.getElementById(id);
+  // SIKRING (sweep 25/8): ALT server-innhold (fil-/mappe-/jobbnavn) escapes før
+  // innerHTML — filnavn kan settes av gjester via innsamlinger (stored XSS).
+  const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const fmt = b => b >= 1e9 ? `${(b/1e9).toFixed(2)} GB` : b >= 1e6 ? `${(b/1e6).toFixed(1)} MB` : `${Math.round(b/1e3)} kB`;
   const store = await load('transfer.json', { autoSave: true });
   let portal = '', nokkel = '', data = null, valgtMappe = '', maal = '', visning = 'mappe';
@@ -324,7 +327,7 @@
     if (!synker.length) { el.innerHTML = `<div class="hint">${t.synkIngen}</div>`; return; }
     for (const x of synker) {
       const r = document.createElement('div'); r.className = 'synk-rad';
-      r.innerHTML = `<div><div class="tekst">${lokalNavn(x.lokal)} <span class="pil">→</span> ${x.navn || t.hele}</div><div class="lokal" title="${x.lokal}">${x.lokal}</div></div><span class="hint">${x.aktiv ? '●' : '○'}</span><button class="btn liten">${x.aktiv ? t.synkPause : t.synkFortsett}</button><button class="btn liten">${t.synkFjern}</button>`;
+      r.innerHTML = `<div><div class="tekst">${esc(lokalNavn(x.lokal))} <span class="pil">→</span> ${esc(x.navn || t.hele)}</div><div class="lokal" title="${esc(x.lokal)}">${esc(x.lokal)}</div></div><span class="hint">${x.aktiv ? '●' : '○'}</span><button class="btn liten">${x.aktiv ? t.synkPause : t.synkFortsett}</button><button class="btn liten">${t.synkFjern}</button>`;
       const [pause, fjern] = r.querySelectorAll('button');
       pause.onclick = async () => { x.aktiv = !x.aktiv; await lagreSynk(); tegnSynk(); };
       fjern.onclick = async () => { synker = synker.filter(y => y !== x); await lagreSynk(); tegnSynk(); };
@@ -455,7 +458,7 @@
       const b = document.createElement('button'); b.className = (id === valgtMappe && visning === 'mappe' ? 'valgt' : ''); b.style.paddingLeft = `${9 + dybde * 16}px`; // ubegrenset dybde
       const n = id ? antall.get(id) || 0 : data.filer.length;
       const barn = barnAv(id); const erLukket = id && lukket.has(id);
-      b.innerHTML = `<span class="trekant${barn.length ? '' : ' uten'}">${barn.length ? (erLukket ? '▶' : '▼') : ''}</span><span>${dybde === 0 ? '🗄' : '📁'}</span><span class="navn">${navn}</span><small>${n || ''}</small>`;
+      b.innerHTML = `<span class="trekant${barn.length ? '' : ' uten'}">${barn.length ? (erLukket ? '▶' : '▼') : ''}</span><span>${dybde === 0 ? '🗄' : '📁'}</span><span class="navn">${esc(navn)}</span><small>${n || ''}</small>`;
       b.onclick = () => velgMappe(id);
       b.querySelector('.trekant').onclick = async e => { e.stopPropagation(); if (!barn.length) return; if (lukket.has(id)) lukket.delete(id); else lukket.add(id); await store.set('lukket', [...lukket]); tegnTre(); };
       b.oncontextmenu = e => mappeMeny(e, id);
@@ -509,10 +512,10 @@
     // Undermapper som rader øverst (Frame.io-modellen): klikk → inn i mappa.
     const bytesI = new Map(); for (const f of data.filer) bytesI.set(f.mappeId || '', (bytesI.get(f.mappeId || '') || 0) + f.bytes);
     const underAv = mid => { const u = underMapper(mid); let b = 0; for (const [k, v] of bytesI) if (u.has(k)) b += v; return b; };
-    for (const m of barn) { const r = document.createElement('div'); r.className = 'filrad mappe'; r.innerHTML = `<span class="navn">${m.navn}</span><span class="tall">${fmt(underAv(m.id))}</span><span></span><span class="hent"><button class="btn liten">${t.apneMappe} ›</button></span>`; r.onclick = () => velgMappe(m.id); r.oncontextmenu = e => mappeMeny(e, m.id); el.appendChild(r); }
+    for (const m of barn) { const r = document.createElement('div'); r.className = 'filrad mappe'; r.innerHTML = `<span class="navn">${esc(m.navn)}</span><span class="tall">${fmt(underAv(m.id))}</span><span></span><span class="hent"><button class="btn liten">${t.apneMappe} ›</button></span>`; r.onclick = () => velgMappe(m.id); r.oncontextmenu = e => mappeMeny(e, m.id); el.appendChild(r); }
     for (const f of filer.slice(0, 2000)) {
       const r = document.createElement('div'); r.className = 'filrad';
-      r.innerHTML = `<span class="navn" title="${f.filnavn}">${f.filnavn}</span><span class="tall">${fmt(f.bytes)}</span><span class="tall">${f.opprettet ? new Date(f.opprettet).toLocaleDateString(erNo ? 'nb-NO' : 'en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : ''}</span><span class="hent"><button class="btn liten">⤓ ${t.hent}</button></span>`;
+      r.innerHTML = `<span class="navn" title="${esc(f.filnavn)}">${esc(f.filnavn)}</span><span class="tall">${fmt(f.bytes)}</span><span class="tall">${f.opprettet ? new Date(f.opprettet).toLocaleDateString(erNo ? 'nb-NO' : 'en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : ''}</span><span class="hent"><button class="btn liten">⤓ ${t.hent}</button></span>`;
       r.querySelector('button').onclick = () => startJobb(f.filnavn, [{ ...f, sti: '' }], f.mappeId, false);
       r.oncontextmenu = e => { e.preventDefault(); e.stopPropagation(); visKmeny(e.clientX, e.clientY, f.filnavn, [
         [`⤓ ${t.hent}`, () => startJobb(f.filnavn, [{ ...f, sti: '' }], f.mappeId, false)],
@@ -673,7 +676,7 @@
       const k = jobbTall(j);
       const el = document.createElement('div'); el.className = 'jobbrad'; el.id = 'jb-' + j.id;
       const st = j.status === 'kø' ? `<span>${t.iKo}</span>` : j.status === 'laster' ? `<div class="bar"><i style="width:${k.total ? Math.min(100, k.hentet / k.total * 100) : 0}%"></i></div><span class="status">${j.filer.length === 1 ? `${fmt(k.hentet)} / ${fmt(k.total)}` : `${k.ferdig}/${j.filer.length}`}</span>` : j.status === 'ferdig' ? `<span class="ok">✓</span><span>${t.ferdig}</span>` : j.status === 'avbrutt' ? `<span class="feil">✕</span><span>${t.avbrutt}</span>` : `<span class="feil">✕</span><span>${j.ok} ok · ${j.feil.length} ${t.feilet}</span>`;
-      el.innerHTML = `<span class="navn">${j.type === 'opp' ? '⤒' : '⤓'} ${j.navn}</span><span class="tall">${j.filer.length}</span><span class="tall">${fmt(k.total)}</span><span class="st">${st}</span><span class="rad"></span>`;
+      el.innerHTML = `<span class="navn">${j.type === 'opp' ? '⤒' : '⤓'} ${esc(j.navn)}</span><span class="tall">${j.filer.length}</span><span class="tall">${fmt(k.total)}</span><span class="st">${st}</span><span class="rad"></span>`;
       const rad = el.querySelector('.rad');
       const mk = document.createElement('button'); mk.className = 'btn liten meny-knapp'; mk.textContent = '⋯'; rad.appendChild(mk);
       const meny = document.createElement('div'); meny.className = 'meny';
@@ -697,7 +700,7 @@
       // Én fil = jobbraden ER fila (kø 25/8): ingen duplisert underrad.
       if (j.filer.length === 1) { p.appendChild(el); continue; }
       const filer = document.createElement('div'); filer.className = 'jobb-filer-rad' + (j === aktiv ? '' : ' skjult'); filer.id = 'jf-' + j.id;
-      for (const f of j.filer.slice(0, 500)) { const s = filTilstand.get(f.id || f.sti); const r = document.createElement('div'); r.className = 'fil ' + (s?.status || ''); r.id = 'f-' + (f.id || f.sti); r.innerHTML = `<span class="navn" title="${f.sti ? f.sti + '/' : ''}${f.filnavn}">${f.filnavn}</span><div class="bar"><i style="width:${s ? (s.status === 'ferdig' || s.status === 'hoppet' ? 100 : s.total ? Math.min(100, s.hentet / s.total * 100) : 0) : 0}%"></i></div><span class="status">${s ? (s.status === 'ferdig' ? `✓ ${t.ferdig}` : s.status === 'hoppet' ? `✓ ${t.laDer}` : s.status === 'feil' ? `✕ ${s.feil || t.feilet}` : s.status === 'hoppetNavn' ? `– ${t.hoppetNavn}` : s.status === 'verifisert' ? `✓ ${t.verifisert}` : `${fmt(s.hentet)} / ${fmt(s.total)}`) : t.venter}</span>`; filer.appendChild(r); }
+      for (const f of j.filer.slice(0, 500)) { const s = filTilstand.get(f.id || f.sti); const r = document.createElement('div'); r.className = 'fil ' + (s?.status || ''); r.id = 'f-' + (f.id || f.sti); r.innerHTML = `<span class="navn" title="${esc(f.sti ? f.sti + '/' : '')}${esc(f.filnavn)}">${esc(f.filnavn)}</span><div class="bar"><i style="width:${s ? (s.status === 'ferdig' || s.status === 'hoppet' ? 100 : s.total ? Math.min(100, s.hentet / s.total * 100) : 0) : 0}%"></i></div><span class="status">${s ? (s.status === 'ferdig' ? `✓ ${t.ferdig}` : s.status === 'hoppet' ? `✓ ${t.laDer}` : s.status === 'feil' ? `✕ ${s.feil || t.feilet}` : s.status === 'hoppetNavn' ? `– ${t.hoppetNavn}` : s.status === 'verifisert' ? `✓ ${t.verifisert}` : `${fmt(s.hentet)} / ${fmt(s.total)}`) : t.venter}</span>`; filer.appendChild(r); }
       el.onclick = e => { if (e.target.closest('.rad')) return; filer.classList.toggle('skjult'); };
       p.appendChild(el); p.appendChild(filer);
     }

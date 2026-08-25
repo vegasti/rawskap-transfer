@@ -138,7 +138,15 @@ async fn last_ned_en(
     struper: &Struper,
     konflikt: &str,
 ) -> Result<(), String> {
-    let mappe = if fil.sti.is_empty() { rot.to_path_buf() } else { rot.join(&fil.sti) };
+    // SIKRING (sweep 25/8): fil.sti kommer fra server-/delingsdata — vask hver
+    // komponent (trygt_navn) og kast «..»/tomme, så en fiendtlig deling aldri
+    // kan skrive utenfor nedlastingsmappa (`..\..\Startup`-klassikeren).
+    let trygg_sti: std::path::PathBuf = fil.sti
+        .split(['/', '\\'])
+        .filter(|d| !d.is_empty() && *d != "." && *d != "..")
+        .map(trygt_navn)
+        .collect();
+    let mappe = if trygg_sti.as_os_str().is_empty() { rot.to_path_buf() } else { rot.join(trygg_sti) };
     tokio::fs::create_dir_all(&mappe).await.map_err(|e| format!("{e}"))?;
     let mut maal = mappe.join(trygt_navn(&fil.filnavn));
     // Når fila finnes: 'hopp' (lik størrelse = ferdig, ellers overskriv — standard),
@@ -709,7 +717,7 @@ fn vis_i_utforsker(sti: String) -> Result<(), String> {
         // — begge deler får Explorer til å gi opp og åpne Dokumenter i stedet.
         // Normaliser til backslash og send argumentet RÅTT med egne fnutter.
         use std::os::windows::process::CommandExt;
-        let vsti = sti.replace('/', "\\");
+        let vsti = sti.replace('/', "\\").replace('"', "");
         let mut c = std::process::Command::new("explorer.exe");
         if p.is_dir() { c.raw_arg(format!("\"{vsti}\"")); } else { c.raw_arg(format!("/select,\"{vsti}\"")); }
         c.spawn().map_err(|e| format!("{e}"))?;
