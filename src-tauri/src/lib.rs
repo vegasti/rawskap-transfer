@@ -154,6 +154,9 @@ async fn last_ned_en(
 
     if let Ok(m) = tokio::fs::metadata(&maal).await {
         if fil.bytes > 0 && m.len() == fil.bytes {
+            // Død .part ved siden av komplett fil (kø 25/8): en avbrutt runde
+            // etterlot resten — fila ER her, så resume-dataene er verdiløse.
+            let _ = tokio::fs::remove_file(&part).await;
             let _ = app.emit("framdrift", Framdrift { id: fil.id.clone(), hentet: fil.bytes, total: fil.bytes, status: "hoppet".into(), feil: None });
             return Ok(());
         }
