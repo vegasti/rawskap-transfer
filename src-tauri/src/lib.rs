@@ -652,6 +652,16 @@ async fn slett_filer(portal: String, nokkel: String, ids: Vec<String>) -> Result
 /// så vi åpner selv. Fil → Explorer med fila markert; mappe → mappa.
 /// Versjonssjekk (25/8): henter manifestet fra media-domenet — Rust-siden
 /// fordi webviewen ikke får CORS mot det. Returnerer rå JSON; JS sammenligner.
+/// Levende tray-status (0.1.2): JS speiler statuslinja inn i kurv-tooltipen —
+/// hold musa over ikonet og se «⤒ 3 aktive · 45 MB/s» uten å åpne vinduet.
+#[tauri::command]
+fn sett_tray_tekst(app: tauri::AppHandle, tekst: String) {
+    if let Some(t) = app.tray_by_id("hoved") {
+        let kort: String = tekst.chars().take(120).collect();
+        let _ = t.set_tooltip(Some(if kort.is_empty() { "Rawskap Transfer".into() } else { format!("Rawskap Transfer — {kort}") }));
+    }
+}
+
 #[tauri::command]
 async fn sjekk_versjon() -> Result<String, String> {
     let r = reqwest::Client::builder()
@@ -827,7 +837,7 @@ pub fn run() {
             let apne = MenuItem::with_id(app, "apne", "Åpne Rawskap Transfer", true, None::<&str>)?;
             let avslutt = MenuItem::with_id(app, "avslutt", "Avslutt", true, None::<&str>)?;
             let meny = Menu::with_items(app, &[&apne, &avslutt])?;
-            let mut tb = TrayIconBuilder::new().menu(&meny).show_menu_on_left_click(false).tooltip("Rawskap Transfer");
+            let mut tb = TrayIconBuilder::with_id("hoved").menu(&meny).show_menu_on_left_click(false).tooltip("Rawskap Transfer");
             if let Some(ikon) = app.default_window_icon().cloned() { tb = tb.icon(ikon); }
             tb.on_menu_event(|app, ev| match ev.id.as_ref() { "apne" => vis_vindu(app), "avslutt" => app.exit(0), _ => {} })
               .on_tray_icon_event(|tray, ev| { if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev { vis_vindu(tray.app_handle()); } })
@@ -847,7 +857,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
-        .invoke_handler(tauri::generate_handler![hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
