@@ -657,7 +657,7 @@ async fn sjekk_versjon() -> Result<String, String> {
     let r = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build().map_err(|e| format!("{e}"))?
-        .get("https://media.rawstudios.no/apper/transfer-versjon.json")
+        .get("https://rawskap.no/api/transfer/versjon")
         .send().await.map_err(|e| format!("{e}"))?;
     r.text().await.map_err(|e| format!("{e}"))
 }
