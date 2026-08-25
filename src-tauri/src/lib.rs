@@ -678,8 +678,14 @@ fn vis_i_utforsker(sti: String) -> Result<(), String> {
     if !p.exists() { return Err("finnes ikke".into()); }
     #[cfg(windows)]
     {
+        // Explorer-fella (kø 25/8): /select tåler verken skråstreker (stien
+        // bygges som «mappe/fil» i JS) eller std-quotingen rundt komma-argumentet
+        // — begge deler får Explorer til å gi opp og åpne Dokumenter i stedet.
+        // Normaliser til backslash og send argumentet RÅTT med egne fnutter.
+        use std::os::windows::process::CommandExt;
+        let vsti = sti.replace('/', "\\");
         let mut c = std::process::Command::new("explorer.exe");
-        if p.is_dir() { c.arg(&sti); } else { c.arg(format!("/select,{}", sti)); }
+        if p.is_dir() { c.raw_arg(format!("\"{vsti}\"")); } else { c.raw_arg(format!("/select,\"{vsti}\"")); }
         c.spawn().map_err(|e| format!("{e}"))?;
     }
     #[cfg(target_os = "macos")]
