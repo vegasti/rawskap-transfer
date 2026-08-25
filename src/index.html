@@ -625,7 +625,7 @@
   const fmtFart = bps => bps >= 1e6 ? `${(bps / 1e6).toFixed(bps >= 1e7 ? 0 : 1)} MB/s` : `${Math.max(0, Math.round(bps / 1e3))} kB/s`;
   const fmtEta = s => !isFinite(s) || s <= 0 ? '' : s >= 3600 ? `${Math.round(s / 3600)}t` : s >= 60 ? `${Math.round(s / 60)}m` : `${Math.max(1, Math.round(s))}s`;
   const jobbTall = j => { let hentet = 0, ferdig = 0; const total = j.filer.reduce((s, f) => s + f.bytes, 0); for (const f of j.filer) { const s = filTilstand.get(f.id); if (!s) continue; if (s.status === 'ferdig' || s.status === 'hoppet' || s.status === 'verifisert' || s.status === 'hoppetNavn') { hentet += f.bytes; ferdig++; } else if (s.status !== 'feil') hentet += s.hentet; } return { hentet, total, ferdig }; };
-  function oppdaterJobbBar() { if (!aktiv) return; const el = document.getElementById('jb-' + aktiv.id); if (!el) return; const k = jobbTall(aktiv); const b = el.querySelector('.st .bar i'); if (b) b.style.width = k.total ? `${Math.min(100, k.hentet / k.total * 100)}%` : '0%'; const st = el.querySelector('.st .status'); if (st) st.textContent = `${k.ferdig}/${aktiv.filer.length}`; }
+  function oppdaterJobbBar() { if (!aktiv) return; const el = document.getElementById('jb-' + aktiv.id); if (!el) return; const k = jobbTall(aktiv); const b = el.querySelector('.st .bar i'); if (b) b.style.width = k.total ? `${Math.min(100, k.hentet / k.total * 100)}%` : '0%'; const st = el.querySelector('.st .status'); if (st) st.textContent = aktiv.filer.length === 1 ? `${fmt(k.hentet)} / ${fmt(k.total)}` : `${k.ferdig}/${aktiv.filer.length}`; }
   // Tray-tooltipen speiler statuslinja (throttlet — bare når teksten endres).
   let sisteTray = '';
   function speilTray() {
@@ -655,7 +655,7 @@
     for (const j of jobber) {
       const k = jobbTall(j);
       const el = document.createElement('div'); el.className = 'jobbrad'; el.id = 'jb-' + j.id;
-      const st = j.status === 'kø' ? `<span>${t.iKo}</span>` : j.status === 'laster' ? `<div class="bar"><i style="width:${k.total ? Math.min(100, k.hentet / k.total * 100) : 0}%"></i></div><span class="status">${k.ferdig}/${j.filer.length}</span>` : j.status === 'ferdig' ? `<span class="ok">✓</span><span>${t.ferdig}</span>` : j.status === 'avbrutt' ? `<span class="feil">✕</span><span>${t.avbrutt}</span>` : `<span class="feil">✕</span><span>${j.ok} ok · ${j.feil.length} ${t.feilet}</span>`;
+      const st = j.status === 'kø' ? `<span>${t.iKo}</span>` : j.status === 'laster' ? `<div class="bar"><i style="width:${k.total ? Math.min(100, k.hentet / k.total * 100) : 0}%"></i></div><span class="status">${j.filer.length === 1 ? `${fmt(k.hentet)} / ${fmt(k.total)}` : `${k.ferdig}/${j.filer.length}`}</span>` : j.status === 'ferdig' ? `<span class="ok">✓</span><span>${t.ferdig}</span>` : j.status === 'avbrutt' ? `<span class="feil">✕</span><span>${t.avbrutt}</span>` : `<span class="feil">✕</span><span>${j.ok} ok · ${j.feil.length} ${t.feilet}</span>`;
       el.innerHTML = `<span class="navn">${j.type === 'opp' ? '⤒' : '⤓'} ${j.navn}</span><span class="tall">${j.filer.length}</span><span class="tall">${fmt(k.total)}</span><span class="st">${st}</span><span class="rad"></span>`;
       const rad = el.querySelector('.rad');
       const mk = document.createElement('button'); mk.className = 'btn liten meny-knapp'; mk.textContent = '⋯'; rad.appendChild(mk);
@@ -677,6 +677,8 @@
       rad.appendChild(meny);
       mk.onclick = e => { e.stopPropagation(); const var_ = meny.classList.contains('åpen'); document.querySelectorAll('.meny.åpen').forEach(x => x.classList.remove('åpen')); if (!var_) meny.classList.add('åpen'); };
       // Klikk på raden → filene under (brettes ut)
+      // Én fil = jobbraden ER fila (kø 25/8): ingen duplisert underrad.
+      if (j.filer.length === 1) { p.appendChild(el); continue; }
       const filer = document.createElement('div'); filer.className = 'jobb-filer-rad' + (j === aktiv ? '' : ' skjult'); filer.id = 'jf-' + j.id;
       for (const f of j.filer.slice(0, 500)) { const s = filTilstand.get(f.id || f.sti); const r = document.createElement('div'); r.className = 'fil ' + (s?.status || ''); r.id = 'f-' + (f.id || f.sti); r.innerHTML = `<span class="navn" title="${f.sti ? f.sti + '/' : ''}${f.filnavn}">${f.filnavn}</span><div class="bar"><i style="width:${s ? (s.status === 'ferdig' || s.status === 'hoppet' ? 100 : s.total ? Math.min(100, s.hentet / s.total * 100) : 0) : 0}%"></i></div><span class="status">${s ? (s.status === 'ferdig' ? `✓ ${t.ferdig}` : s.status === 'hoppet' ? `✓ ${t.laDer}` : s.status === 'feil' ? `✕ ${s.feil || t.feilet}` : s.status === 'hoppetNavn' ? `– ${t.hoppetNavn}` : s.status === 'verifisert' ? `✓ ${t.verifisert}` : `${fmt(s.hentet)} / ${fmt(s.total)}`) : t.venter}</span>`; filer.appendChild(r); }
       el.onclick = e => { if (e.target.closest('.rad')) return; filer.classList.toggle('skjult'); };
