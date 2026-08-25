@@ -675,6 +675,29 @@ async fn sjekk_versjon() -> Result<String, String> {
     r.text().await.map_err(|e| format!("{e}"))
 }
 
+/// Alders-rydding av .part (kø 25/8): .part MÅ ligge ved målet (samme volum =
+/// gratis rename; cache på C: ville tvunget alt innom systemdisken) — men
+/// avbrutte jobber som aldri gjenopptas skal ikke rote til mappa for alltid.
+/// Feier ETT nivå av en kjent nedlastingsmappe; sletter kun *.part eldre enn
+/// `dager`. Ferske beholdes — de er gjenopptaks-data.
+#[tauri::command]
+async fn rydd_part_i_mappe(mappe: String, dager: u64) -> u32 {
+    let mut slettet = 0u32;
+    let grense = std::time::SystemTime::now() - std::time::Duration::from_secs(dager.max(1) * 86_400);
+    if let Ok(mut rd) = tokio::fs::read_dir(&mappe).await {
+        while let Ok(Some(e)) = rd.next_entry().await {
+            let sti = e.path();
+            if sti.extension().and_then(|x| x.to_str()) != Some("part") { continue; }
+            if let Ok(m) = e.metadata().await {
+                if m.is_file() && m.modified().map(|t| t < grense).unwrap_or(false) {
+                    if tokio::fs::remove_file(&sti).await.is_ok() { slettet += 1; }
+                }
+            }
+        }
+    }
+    slettet
+}
+
 #[tauri::command]
 fn vis_i_utforsker(sti: String) -> Result<(), String> {
     let p = std::path::Path::new(&sti);
@@ -866,7 +889,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
-        .invoke_handler(tauri::generate_handler![hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }

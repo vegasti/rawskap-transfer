@@ -570,6 +570,12 @@
   const lagreKo = () => store.set('ko', jobber.map(j => ({ ...j, status: j.status === 'laster' ? 'avbrutt' : j.status }))).catch(() => {});
   { const gamle = await store.get('ko'); if (Array.isArray(gamle) && gamle.length) { for (const j of gamle) jobber.push({ ...j, status: (j.status === 'laster' || j.status === 'kø') ? 'avbrutt' : j.status, feil: j.feil || [] }); setTimeout(() => { $('overf-tekst').textContent = t.gjenopptatt; }, 0); } }
   const filTilstand = new Map();
+  // .part-feiing (kø 25/8): kjente nedlastingsmapper ryddes for rester eldre
+  // enn 14 dager — ferske .part er gjenopptaks-data og står urørt.
+  setTimeout(async () => {
+    const mapper = new Set([maal, ...jobber.filter(j => j.type !== 'opp' && j.maal).map(j => j.maal)].filter(Boolean));
+    for (const m of mapper) { try { await invoke('rydd_part_i_mappe', { mappe: m, dager: 14 }); } catch { /* */ } }
+  }, 8000);
   document.addEventListener('click', e => { if (!e.target.closest('.meny') && !e.target.closest('.meny-knapp')) document.querySelectorAll('.meny.åpen').forEach(m => m.classList.remove('åpen')); });
   function startJobb(navn, filer, mappeId, erMappe, type = 'ned') {
     if (type !== 'opp' && (!maal || !P.fastMaal)) { return open({ directory: true, multiple: false, title: t.velgMaal }).then(async v => { if (!v) return; maal = v; await store.set('maal', v); visMaal(); startJobbNaa(navn, filer, mappeId, erMappe, type); }); }
