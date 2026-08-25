@@ -44,15 +44,25 @@ jobs:
           APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
         run: printf '%s' "$APPLE_API_KEY_CONTENT" > "$RUNNER_TEMP/AuthKey.p8"
 
-      - name: Bygg + signer + notariser
+      # Notarisering holdes UTENFOR bygget (25/8): foerste natt sto runneren 4 t
+      # og ventet paa Apples koe til nettet ble kuttet. Naa: bygg+signer (raskt),
+      # send inn med --no-wait — Gatekeeper validerer billetten online naar Apple
+      # omsider godkjenner. Stapling (offline-install) kan goeres i senere kjoering.
+      - name: Bygg + signer
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: npm run tauri build -- --bundles app,dmg
+
+      - name: Send til notarisering (no-wait)
+        env:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
-        run: npm run tauri build -- --bundles app,dmg
+        run: |
+          DMG=$(find src-tauri/target/release/bundle/dmg -name '*.dmg' | head -1)
+          test -n "$DMG"
+          xcrun notarytool submit "$DMG" --key "$RUNNER_TEMP/AuthKey.p8" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --no-wait
 
       - name: Verifiser signatur
         run: |
