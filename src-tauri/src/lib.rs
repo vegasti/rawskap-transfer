@@ -407,12 +407,30 @@ fn resume_skriv(p: &Path, r: &Resume) { if let Ok(b) = serde_json::to_vec(r) { l
 
 /// xxh64 av hele fila (1 MB-blokker). Brukes ved opplasting (lagres på raden)
 /// og ved nedlasting (verifisering mot serverens verdi).
-async fn fil_xxh64(sti: &Path) -> Result<String, String> {
+async fn fil_xxh64(sti: &Path) -> Result<String, String> { fil_xxh64_meld(sti, None).await }
+
+/// xxh64 over hele fila. `meld` gir framdrift underveis (app, id, total) —
+/// STORE filer bruker flere titalls sekunder her FØR første byte er sendt, og
+/// uten melding ser appen ut som den henger på 0 kB/s (Vegard 28/8).
+async fn fil_xxh64_meld(sti: &Path, meld: Option<(&AppHandle, &str, u64)>) -> Result<String, String> {
     use tokio::io::AsyncReadExt;
     let mut f = tokio::fs::File::open(sti).await.map_err(|e| format!("{e}"))?;
     let mut h = xxhash_rust::xxh64::Xxh64::new(0);
     let mut buf = vec![0u8; 1 << 20];
-    loop { let n = f.read(&mut buf).await.map_err(|e| format!("{e}"))?; if n == 0 { break; } h.update(&buf[..n]); }
+    let mut lest: u64 = 0;
+    let mut sist_meldt = std::time::Instant::now();
+    loop {
+        let n = f.read(&mut buf).await.map_err(|e| format!("{e}"))?;
+        if n == 0 { break; }
+        h.update(&buf[..n]);
+        lest += n as u64;
+        if let Some((app, id, total)) = meld {
+            if sist_meldt.elapsed().as_millis() > 200 {
+                sist_meldt = std::time::Instant::now();
+                let _ = app.emit("framdrift", Framdrift { id: id.to_string(), hentet: lest, total, status: "hash".into(), feil: None });
+            }
+        }
+    }
     Ok(format!("{:016x}", h.digest()))
 }
 
@@ -420,6 +438,9 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let rsti = resume_sti(&fil.sti, bytes, sist);
     let mut r = resume_les(&rsti).filter(|r| r.bytes == bytes && r.mappe_id == mappe_id).unwrap_or_default();
+    // Rundturen til portalen (multipart-start, og siden signering av deler) tar
+    // et lite oyeblikk der ingen bytes gaar. Si det, i stedet for a staa pa 0.
+    let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: 0, total: bytes, status: "kobler".into(), feil: None });
     if r.upload_id.is_empty() {
         let resp = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "multipart-start", "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) })).send().await.map_err(|e| format!("{e}"))?;
         let st = resp.status().as_u16();
@@ -438,6 +459,7 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
     // Presigner deler i bolker på 20 (URL-ene lever 1 t).
     let mangler: Vec<u32> = (1..=antall).filter(|n| !ferdige.contains(n)).collect();
     for bolk in mangler.chunks(20) {
+        if hentet == 0 { let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet, total: bytes, status: "kobler".into(), feil: None }); }
         let resp = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "multipart-deler", "originalKey": r.original_key, "uploadId": r.upload_id, "deler": bolk })).send().await.map_err(|e| format!("{e}"))?;
         let d: serde_json::Value = resp.json().await.map_err(|e| format!("{e}"))?;
         let urler: std::collections::HashMap<u32, String> = d["deler"].as_array().map(|a| a.iter().filter_map(|x| Some((x["nr"].as_u64()? as u32, x["url"].as_str()?.to_string()))).collect()).unwrap_or_default();
@@ -452,9 +474,40 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
             f.read_exact(&mut buf).await.map_err(|e| format!("{e}"))?;
             struper.tell(len).await;
             // Én del = ett forsøk × 3 (ekte resume: ferdige deler røres aldri).
+            //
+            // ⚠ FRAMDRIFT UNDERVEIS (28/8, Vegard: «går fra 3.8 MB/s til 22 MB/s
+            // hele tiden»): før meldte vi først NÅR en 64 MB-del var ferdig. Ved
+            // ~10 MB/s betyr det at telleren står bom stille i ~6 sekunder og så
+            // hopper 64 MB — og en fartsmåler som sampler hvert sekund ser
+            // vekselvis 0 og 64 MB/s. Nå strømmes delen i 256 kB-biter med
+            // teller, akkurat som én-PUT-løypa, så tallet blir ekte.
+            let buf = Arc::new(buf);
             let mut etag = None;
             for _ in 0..3 {
-                match bare.put(url).header(reqwest::header::CONTENT_LENGTH, len).body(buf.clone()).send().await {
+                let app2 = app.clone();
+                let id2 = fil.sti.clone();
+                let base = hentet;
+                let mut sist_meldt = std::time::Instant::now();
+                let sendt = Arc::new(AtomicU64::new(0));
+                let sendt2 = sendt.clone();
+                let b = buf.clone();
+                // Ved omforsøk starter delen på nytt fra `base` — ærlig, for
+                // bytene MÅ sendes om igjen.
+                let strom = futures_util::stream::unfold((0usize, b), |(pos, b)| async move {
+                    if pos >= b.len() { return None; }
+                    let slutt = (pos + (1 << 18)).min(b.len());
+                    let bit = bytes::Bytes::copy_from_slice(&b[pos..slutt]);
+                    Some((Ok::<bytes::Bytes, std::io::Error>(bit), (slutt, b)))
+                }).inspect(move |r: &Result<bytes::Bytes, std::io::Error>| {
+                    if let Ok(bit) = r {
+                        let sendt_na = sendt2.fetch_add(bit.len() as u64, Ordering::Relaxed) + bit.len() as u64;
+                        if sist_meldt.elapsed().as_millis() > 150 {
+                            sist_meldt = std::time::Instant::now();
+                            let _ = app2.emit("framdrift", Framdrift { id: id2.clone(), hentet: (base + sendt_na).min(bytes), total: bytes, status: "laster".into(), feil: None });
+                        }
+                    }
+                });
+                match bare.put(url).header(reqwest::header::CONTENT_LENGTH, len).body(reqwest::Body::wrap_stream(strom)).send().await {
                     Ok(resp) if resp.status().is_success() => { etag = resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(|s| s.trim_matches('"').to_string()); break; }
                     Ok(resp) => { if resp.status().as_u16() == 403 { break; } }
                     Err(_) => {}
@@ -467,7 +520,9 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
             let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet, total: bytes, status: "laster".into(), feil: None });
         }
     }
-    // Sett sammen
+    // Sett sammen. R2 bruker maalbar tid pa a lime sammen 100+ deler — det er
+    // her «star lenge pa 100 %» begynner.
+    let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: bytes, total: bytes, status: "setter".into(), feil: None });
     let deler: Vec<serde_json::Value> = r.deler.iter().map(|(n, e)| serde_json::json!({ "nr": n, "etag": e })).collect();
     let resp = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "multipart-fullfor", "originalKey": r.original_key, "uploadId": r.upload_id, "deler": deler })).send().await.map_err(|e| format!("{e}"))?;
     let d: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
@@ -533,13 +588,14 @@ async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Clien
     let sist = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
     // xxh64 mens vi likevel leser — lagres på raden, verifiseres ved nedlasting.
     let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: 0, total: bytes, status: "hash".into(), feil: None });
-    let xxh = fil_xxh64(std::path::Path::new(&fil.sti)).await.ok();
+    let xxh = fil_xxh64_meld(std::path::Path::new(&fil.sti), Some((app, &fil.sti, bytes))).await.ok();
     // Store filer: multipart m/ resume. Små: én PUT som før.
     if bytes > DEL_GRENSE {
         let (key, _) = last_opp_multipart(app, k, bare, portal, fil, mappe_id, avbryt, struper.clone(), &navn, mime, bytes, sist).await?;
         return fullfor_opplasting(app, k, portal, fil, &key, &navn, mime, bytes, sist, mappe_id, xxh).await;
     }
     // 1) presign
+    let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: 0, total: bytes, status: "kobler".into(), feil: None });
     let r = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "presign", "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) })).send().await.map_err(|e| format!("{e}"))?;
     let st = r.status().as_u16();
     if st == 401 || st == 403 { return Err("Ikke tilgang — logg inn på nytt (API-nøkler kan ikke laste opp)".into()); }
@@ -573,6 +629,10 @@ async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Clien
 async fn fullfor_opplasting(app: &AppHandle, k: &reqwest::Client, portal: &str, fil: &OppFil, key: &str, navn: &str, mime: &str, bytes: u64, sist: u64, mappe_id: &str, xxh: Option<String>) -> Result<(), String> {
     let mut body = serde_json::json!({ "action": "fullfor", "originalKey": key, "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) });
     if let Some(x) = xxh { body["xxh64"] = serde_json::json!(x); }
+    // Serveren lager thumb/EXIF/dedup her; for video kjorer ffmpeg LOKALT forst
+    // (poster + sprite). Begge deler skjer ETTER at siste byte er sendt — uten
+    // status sto appen bare stille pa 100 % (Vegard 28/8).
+    let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: bytes, total: bytes, status: "fullfor".into(), feil: None });
     if er_video(navn) {
         let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: bytes, total: bytes, status: "thumbs".into(), feil: None });
         let vi = video_info(app, &fil.sti).await;
