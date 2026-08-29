@@ -383,6 +383,75 @@ async fn video_info(app: &AppHandle, sti: &str) -> VideoInfo {
     v
 }
 
+/// Lager en H.264-avspillingsproxy lokalt og laster den opp til lageret.
+///
+/// HVORFOR HER (30/8, Vegard): uten dette blir en ProRes-master hentet av
+/// Cloudflare Stream (som feiler på formatet) og DERETTER lastet ned igjen av
+/// Rawcode for lokal enkoding — for en 8K ProRes RAW-fil er det to ganger 8 GB
+/// for én klipp. Appen har allerede ffmpeg OG fila på disk; den lager jo
+/// plakaten og spriten fra den. Da er det her proxyen hører hjemme.
+///
+/// Returnerer størrelsen på proxyen, eller None om noe røk — en manglende
+/// proxy skal ALDRI velte selve opplastingen. Da faller vi tilbake til den
+/// gamle løypa (Stream/Rawcode), som fortsatt virker.
+async fn lag_og_last_opp_proxy(app: &AppHandle, bare: &reqwest::Client, sti: &str, put_url: &str, id: &str, total: u64) -> Option<u64> {
+    let _ = app.emit("framdrift", Framdrift { id: id.to_string(), hentet: total, total, status: "proxy".into(), feil: None });
+    let ut = std::env::temp_dir().join(format!("rawskap-proxy-{}-{}.mp4", std::process::id(), rand_suffiks()));
+    let ut_s = ut.to_string_lossy().to_string();
+
+    // MASKINVARE-ENKODING FØRST. Å skalere 8K ned til 1080p på CPU tar minutter
+    // per klipp; NVENC/VideoToolbox gjør det i sanntid eller raskere. libx264
+    // står sist som reservevei — den finnes ALLTID, og maskinvare-enkoderen kan
+    // mangle (Mac uten VideoToolbox-støtte for kilden, driverfeil, virtuell
+    // maskin). Vi prøver etter tur og tar den første som gir en fil.
+    // ⚠ IKKE libx264: den innebygde ffmpeg-en er en LGPL-build, og x264 er GPL —
+    // «Unknown encoder 'libx264'» (målt 30/8). Reserveveien er libopenh264, som
+    // ER med i LGPL-builder. Den tar ikke -crf, bare bitrate.
+    #[cfg(target_os = "macos")]
+    let enkodere: &[(&str, &[&str])] = &[
+        ("h264_videotoolbox", &["-q:v", "55"]),
+        ("libopenh264", &["-b:v", "8M"]),
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let enkodere: &[(&str, &[&str])] = &[
+        ("h264_nvenc", &["-preset", "p4", "-rc", "vbr", "-cq", "26", "-b:v", "0"]),
+        ("libopenh264", &["-b:v", "8M"]),
+    ];
+
+    let mut ok = false;
+    for (enk, kvalitet) in enkodere {
+        let mut args: Vec<String> = vec![
+            "-hide_banner".into(), "-loglevel".into(), "error".into(), "-y".into(),
+            "-i".into(), sti.into(),
+            // 1080p-tak. `-2` runder høyden til partall — H.264 krever det.
+            "-vf".into(), "scale='min(1920,iw)':-2".into(),
+            "-c:v".into(), (*enk).into(),
+        ];
+        args.extend(kvalitet.iter().map(|s| (*s).into()));
+        args.extend([
+            "-pix_fmt".into(), "yuv420p".into(), "-movflags".into(), "+faststart".into(),
+            "-c:a".into(), "aac".into(), "-b:a".into(), "128k".into(),
+            ut_s.clone(),
+        ]);
+        if ffmpeg_ut(app, &args).await.is_ok() {
+            // Enkoderen kan «lykkes» og likevel gi en tom fil — mål resultatet.
+            if tokio::fs::metadata(&ut).await.map(|m| m.len() > 10_000).unwrap_or(false) { ok = true; break; }
+        }
+        let _ = tokio::fs::remove_file(&ut).await;
+    }
+    if !ok { let _ = tokio::fs::remove_file(&ut).await; return None; }
+    let bytes = match tokio::fs::read(&ut).await { Ok(b) if b.len() > 10_000 => b, _ => { let _ = tokio::fs::remove_file(&ut).await; return None; } };
+    let n = bytes.len() as u64;
+    let svar = bare.put(put_url).header(reqwest::header::CONTENT_TYPE, "video/mp4").header(reqwest::header::CONTENT_LENGTH, n).body(bytes).send().await;
+    let _ = tokio::fs::remove_file(&ut).await;
+    match svar { Ok(r) if r.status().is_success() => Some(n), _ => None }
+}
+
+fn rand_suffiks() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    format!("{}", SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0) % 1_000_000)
+}
+
 // ── MULTIPART + RESUME (22/8): filer over DEL_GRENSE går i 64 MB-deler.
 // Tilstand per fil ligger i en liten JSON i appens datamappe (nøkkel =
 // xxh64 av sti|størrelse|mtime) — uploadId, originalKey, ferdige deler m/
@@ -392,7 +461,7 @@ const DEL_BYTES: u64 = 64 * 1024 * 1024;
 const DEL_GRENSE: u64 = 96 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize, Default)]
-struct Resume { upload_id: String, original_key: String, mappe_id: String, bytes: u64, deler: Vec<(u32, String)> }
+struct Resume { upload_id: String, original_key: String, mappe_id: String, bytes: u64, deler: Vec<(u32, String)>, #[serde(default)] proxy_put: String }
 
 fn resume_dir() -> PathBuf {
     let d = dirs::data_local_dir().unwrap_or(std::env::temp_dir()).join("RawskapTransfer").join("opplasting");
@@ -434,7 +503,7 @@ async fn fil_xxh64_meld(sti: &Path, meld: Option<(&AppHandle, &str, u64)>) -> Re
     Ok(format!("{:016x}", h.digest()))
 }
 
-async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &Arc<AtomicBool>, struper: Arc<Struper>, navn: &str, mime: &str, bytes: u64, sist: u64) -> Result<(String, u64), String> {
+async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &Arc<AtomicBool>, struper: Arc<Struper>, navn: &str, mime: &str, bytes: u64, sist: u64) -> Result<(String, u64, String), String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let rsti = resume_sti(&fil.sti, bytes, sist);
     let mut r = resume_les(&rsti).filter(|r| r.bytes == bytes && r.mappe_id == mappe_id).unwrap_or_default();
@@ -447,7 +516,9 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
         let d: serde_json::Value = resp.json().await.map_err(|e| format!("{e}"))?;
         if st == 401 || st == 403 { return Err("Ikke tilgang — logg inn på nytt".into()); }
         let (uid, key) = match (d["uploadId"].as_str(), d["originalKey"].as_str()) { (Some(u), Some(kk)) => (u.to_string(), kk.to_string()), _ => return Err(d["error"].as_str().unwrap_or("multipart-start feilet").to_string()) };
-        r = Resume { upload_id: uid, original_key: key, mappe_id: mappe_id.to_string(), bytes, deler: vec![] };
+        // Serveren tilbyr en presignert URL for avspillingsproxyen (kun video).
+        // Den lagres i resume-fila så en gjenopptatt opplasting ikke mister den.
+        r = Resume { upload_id: uid, original_key: key, mappe_id: mappe_id.to_string(), bytes, deler: vec![], proxy_put: d["proxyPutUrl"].as_str().unwrap_or("").to_string() };
         resume_skriv(&rsti, &r);
     }
     let antall = ((bytes + DEL_BYTES - 1) / DEL_BYTES) as u32;
@@ -528,7 +599,7 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
     let d: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
     if !d["ok"].as_bool().unwrap_or(false) { return Err(d["error"].as_str().unwrap_or("Kunne ikke sette sammen fila").to_string()); }
     let _ = std::fs::remove_file(&rsti);
-    Ok((r.original_key.clone(), hentet))
+    Ok((r.original_key.clone(), hentet, r.proxy_put.clone()))
 }
 
 // ── OPPLASTING (22/8): samme løype som nettleseren — presign → PUT rett til
@@ -591,8 +662,9 @@ async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Clien
     let xxh = fil_xxh64_meld(std::path::Path::new(&fil.sti), Some((app, &fil.sti, bytes))).await.ok();
     // Store filer: multipart m/ resume. Små: én PUT som før.
     if bytes > DEL_GRENSE {
-        let (key, _) = last_opp_multipart(app, k, bare, portal, fil, mappe_id, avbryt, struper.clone(), &navn, mime, bytes, sist).await?;
-        return fullfor_opplasting(app, k, portal, fil, &key, &navn, mime, bytes, sist, mappe_id, xxh).await;
+        let (key, _, proxy_put) = last_opp_multipart(app, k, bare, portal, fil, mappe_id, avbryt, struper.clone(), &navn, mime, bytes, sist).await?;
+        let proxy = lag_proxy_hvis_video(app, bare, &fil.sti, &navn, &proxy_put, bytes).await;
+        return fullfor_opplasting(app, k, portal, fil, &key, &navn, mime, bytes, sist, mappe_id, xxh, proxy).await;
     }
     // 1) presign
     let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: 0, total: bytes, status: "kobler".into(), feil: None });
@@ -602,6 +674,7 @@ async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Clien
     let d: serde_json::Value = r.json().await.map_err(|e| format!("{e}"))?;
     if d["kvoteSperre"].as_bool().unwrap_or(false) { return Err(d["error"].as_str().unwrap_or("Lagringen er full").to_string()); }
     let (url, key) = match (d["uploadUrl"].as_str(), d["originalKey"].as_str()) { (Some(u), Some(k)) => (u.to_string(), k.to_string()), _ => return Err(d["error"].as_str().unwrap_or("presign feilet").to_string()) };
+    let proxy_put = d["proxyPutUrl"].as_str().unwrap_or("").to_string();
     // 2) PUT rett til R2 m/ framdrift
     let f = tokio::fs::File::open(&fil.sti).await.map_err(|e| format!("{e}"))?;
     let id = fil.sti.clone(); let app2 = app.clone();
@@ -622,13 +695,31 @@ async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Clien
         let _ = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "avbryt", "originalKeys": [key] })).send().await;
         return Err("Avbrutt".into());
     }
-    fullfor_opplasting(app, k, portal, fil, &key, &navn, mime, bytes, sist, mappe_id, xxh).await
+    let proxy = lag_proxy_hvis_video(app, bare, &fil.sti, &navn, &proxy_put, bytes).await;
+    fullfor_opplasting(app, k, portal, fil, &key, &navn, mime, bytes, sist, mappe_id, xxh, proxy).await
+}
+
+/// Bare video, og bare når serveren faktisk tilbød en proxy-URL.
+async fn lag_proxy_hvis_video(app: &AppHandle, bare: &reqwest::Client, sti: &str, navn: &str, put_url: &str, total: u64) -> Option<u64> {
+    if put_url.is_empty() || !er_video(navn) { return None; }
+    lag_og_last_opp_proxy(app, bare, sti, put_url, sti, total).await
 }
 
 /// Fullfør-steget (server: thumb/EXIF/dedup for bilder; video: poster/sprite fra ffmpeg her).
-async fn fullfor_opplasting(app: &AppHandle, k: &reqwest::Client, portal: &str, fil: &OppFil, key: &str, navn: &str, mime: &str, bytes: u64, sist: u64, mappe_id: &str, xxh: Option<String>) -> Result<(), String> {
+async fn fullfor_opplasting(app: &AppHandle, k: &reqwest::Client, portal: &str, fil: &OppFil, key: &str, navn: &str, mime: &str, bytes: u64, sist: u64, mappe_id: &str, xxh: Option<String>, proxy: Option<u64>) -> Result<(), String> {
     let mut body = serde_json::json!({ "action": "fullfor", "originalKey": key, "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) });
     if let Some(x) = xxh { body["xxh64"] = serde_json::json!(x); }
+    // Proxyen ligger alt i lageret — si fra, så slipper serveren å be Cloudflare
+    // Stream (som feiler på ProRes) og Rawcode å laste ned originalen på nytt.
+    if let Some(n) = proxy {
+        // ⚠ MÅ være bit for bit lik serverens `proxyNokkel` — den avviser en
+        // nøkkel den ikke selv ville laget. Reservefallet bruker det TRIMMEDE
+        // navnet; `unwrap_or(key)` ville sneket «originals/» inn igjen.
+        let basis = key.trim_start_matches("originals/");
+        let basis = basis.rsplit_once('.').map(|(a, _)| a).unwrap_or(basis);
+        body["proxyKey"] = serde_json::json!(format!("proxy/{basis}.mp4"));
+        body["proxyStorrelse"] = serde_json::json!(n);
+    }
     // Serveren lager thumb/EXIF/dedup her; for video kjorer ffmpeg LOKALT forst
     // (poster + sprite). Begge deler skjer ETTER at siste byte er sendt — uten
     // status sto appen bare stille pa 100 % (Vegard 28/8).
