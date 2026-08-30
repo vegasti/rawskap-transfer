@@ -724,7 +724,10 @@
     $('overf-avbryt').classList.toggle('skjult', !aktiv);
     if (aktiv) {
       const k = jobbTall(aktiv); $('overf-bar').style.width = k.total ? `${Math.min(100, k.hentet / k.total * 100)}%` : '0%';
-      const kø = jobber.filter(j => j.status === 'kø').length;
+      // «+N i kø» teller FILER, som telleren på knappen (Vegard 31/8: 107 filer
+      // i kø viste «+1»). Køede jobber har ingen ferdige filer, så lengden er
+      // hele svaret — ingen jobbTall pr jobb, uansett hvor lang køen blir.
+      const kø = jobber.reduce((s, j) => j.status === 'kø' ? s + (j.filer ? j.filer.length : 0) : s, 0);
       // FASEN til fila som er i arbeid nå (28/8). Uten dette sto linja på
       // «0 B / 6,66 GB» i ti sekunder mens sjekksummen leste fila, og like
       // stille på 100 % mens ffmpeg lagde sprites. Nå sier den hva som skjer.
