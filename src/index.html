@@ -88,7 +88,11 @@
   .overf-linje .bar { flex:1; height:6px; background:rgba(29,29,31,.1); border-radius:999px; overflow:hidden; max-width:420px; }
   .overf-linje .bar i { display:block; height:100%; background:var(--grønn); width:0; transition:width .2s; }
   .overf-linje .tekst { font-size:12.5px; color:var(--svak); }
-  .overf-linje .pil { margin-left:auto; color:var(--svakere); font-size:12px; margin-right:8px; }
+  /* «Vis overføringer ›» sto her (30/8, Vegard: «en pil mot Avbryt var ikke så
+     bra UI»). Hele linja er klikkbar fra før, og den store grønne knappen står
+     alltid framme — så pila var bare en chevron som pekte på slett-knappen.
+     Avbryt overtar høyre-forankringen den hadde. */
+  .overf-linje #overf-avbryt { margin-left:auto; }
   .jobb { border:1px solid var(--kant); border-radius:9px; padding:8px 12px; margin:6px 0; }
   .jobb-hode { display:grid; grid-template-columns:1fr 220px 170px auto; gap:12px; align-items:center; cursor:pointer; }
   .jobb-hode .navn { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -255,7 +259,6 @@
   <div class="overf-linje" id="overf-linje">
     <div class="bar"><i id="overf-bar"></i></div>
     <span class="tekst" id="overf-tekst" data-t="ingenOverf">Ingen overføringer</span>
-    <span class="pil" id="overf-pil"></span>
     <button class="btn liten farlig skjult" id="overf-avbryt" onclick="event.stopPropagation()" data-t="avbrytKnapp">Avbryt</button>
   </div>
 </div>
@@ -475,6 +478,7 @@
   }
   $('vis-overf').onclick = () => visOverfVisning(true);
   $('overf-linje').onclick = () => visOverfVisning(true);
+  $('overf-linje').title = t.visOverf;
   $('overf-avbryt').onclick = () => invoke('avbryt');
   $('rydd-ferdige').onclick = () => { for (let i = jobber.length - 1; i >= 0; i--) if (jobber[i].status === 'ferdig') jobber.splice(i, 1); tegnJobber(); lagreKo(); oppdaterLinje(); };
   // Avbryt alle (0.1.2, Frame-referansen): kø-jobbene merkes avbrutt (Prøv
@@ -720,16 +724,14 @@
         // kan tallfeste, og da er en prosent verre enn ingen.
         const andel = fase.andel != null ? ` ${Math.round(fase.andel * 100)} %` : '';
         $('overf-tekst').textContent = `${aktiv.type === 'opp' ? '⤒' : '⤓'} ${aktiv.navn} · ${fase.tekst} — ${fase.detalj}${andel}${kø ? ` · +${kø} ${t.iKo}` : ''}`;
-        $('overf-pil').textContent = t.visOverf + ' ›';
         speilTray();
         return;
       }
       const fart = fartBps > 1000 ? ` · ${fmtFart(fartBps)}` : '';
       const eta = fartModen() && fartBps > 1000 && k.total > k.hentet ? ` · ${fmtEta((k.total - k.hentet) / fartBps)} ${t.igjen}` : '';
       $('overf-tekst').textContent = `${aktiv.type === 'opp' ? '⤒' : '⤓'} ${aktiv.navn} · ${fmt(k.hentet)} / ${fmt(k.total)}${fart}${eta}${kø ? ` · +${kø} ${t.iKo}` : ''}`;
-      $('overf-pil').textContent = t.visOverf + ' ›';
     }
-    else { $('overf-bar').style.width = jobber.length ? '100%' : '0%'; const f = jobber.filter(j => j.status === 'ferdig').length; $('overf-tekst').textContent = jobber.length ? `${f} ${t.ferdig}${jobber.length - f ? ` · ${jobber.length - f} ${t.feilet}/${t.avbrutt}` : ''}` : t.ingenOverf; $('overf-pil').textContent = jobber.length ? t.visOverf + ' ›' : ''; }
+    else { $('overf-bar').style.width = jobber.length ? '100%' : '0%'; const f = jobber.filter(j => j.status === 'ferdig').length; $('overf-tekst').textContent = jobber.length ? `${f} ${t.ferdig}${jobber.length - f ? ` · ${jobber.length - f} ${t.feilet}/${t.avbrutt}` : ''}` : t.ingenOverf; }
     speilTray();
   }
   function tegnJobber() {
