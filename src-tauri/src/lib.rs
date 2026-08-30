@@ -355,6 +355,22 @@ fn parse_dim(stderr: &str) -> (u32, u32) {
     (0, 0)
 }
 
+/// Er den ferdige proxyen faktisk hele klippet — eller bare de første bildene?
+///
+/// ⚠ 31/8: ffmpeg dekoder DJIs ProRes RAW HQ (aprh) bare ett bilde inn i fila
+/// («unspecified pixel format», gjelder både vår nightly og 8.1.1), og
+/// AVSLUTTER MED KODE 0. Resultatet er en 25 kB mp4 på 0,08 sekunder — som
+/// passerte den gamle vakta på 10 kB og ble lastet opp og merket «klar».
+/// En proxy som lyver om at den er klippet er verre enn ingen proxy: da vet
+/// serveren i det minste at fila trenger behandling.
+async fn proxy_holder(app: &AppHandle, ut: &str, kilde: f64) -> bool {
+    if tokio::fs::metadata(ut).await.map(|m| m.len() <= 10_000).unwrap_or(true) { return false; }
+    if kilde <= 0.0 { return true; }  // ukjent kilde — da er størrelsen alt vi har, som før
+    let Ok((_, err)) = ffmpeg_ut(app, &["-hide_banner".into(), "-i".into(), ut.into()]).await else { return true };
+    // 90 %: et par bilder kan falle av i enden uten at proxyen er ubrukelig.
+    parse_varighet(&err) >= kilde * 0.9
+}
+
 async fn video_info(app: &AppHandle, sti: &str) -> VideoInfo {
     let mut v = VideoInfo { bredde: 0, hoyde: 0, varighet: 0.0, poster: None, sprite: None, frames: 0 };
     let (_, err) = match ffmpeg_ut(app, &["-hide_banner".into(), "-i".into(), sti.into()]).await { Ok(x) => x, Err(_) => return v };
@@ -398,6 +414,11 @@ async fn lag_og_last_opp_proxy(app: &AppHandle, bare: &reqwest::Client, sti: &st
     let _ = app.emit("framdrift", Framdrift { id: id.to_string(), hentet: total, total, status: "proxy".into(), feil: None });
     let ut = std::env::temp_dir().join(format!("rawskap-proxy-{}-{}.mp4", std::process::id(), rand_suffiks()));
     let ut_s = ut.to_string_lossy().to_string();
+    // Fasiten vi måler resultatet mot.
+    let kilde_varighet = {
+        let (_, e) = ffmpeg_ut(app, &["-hide_banner".into(), "-i".into(), sti.into()]).await.unwrap_or_default();
+        parse_varighet(&e)
+    };
 
     // MASKINVARE-ENKODING FØRST. Å skalere 8K ned til 1080p på CPU tar minutter
     // per klipp; NVENC/VideoToolbox gjør det i sanntid eller raskere. libx264
@@ -433,10 +454,7 @@ async fn lag_og_last_opp_proxy(app: &AppHandle, bare: &reqwest::Client, sti: &st
             "-c:a".into(), "aac".into(), "-b:a".into(), "128k".into(),
             ut_s.clone(),
         ]);
-        if ffmpeg_ut(app, &args).await.is_ok() {
-            // Enkoderen kan «lykkes» og likevel gi en tom fil — mål resultatet.
-            if tokio::fs::metadata(&ut).await.map(|m| m.len() > 10_000).unwrap_or(false) { ok = true; break; }
-        }
+        if ffmpeg_ut(app, &args).await.is_ok() && proxy_holder(app, &ut_s, kilde_varighet).await { ok = true; break; }
         let _ = tokio::fs::remove_file(&ut).await;
     }
     if !ok { let _ = tokio::fs::remove_file(&ut).await; return None; }
