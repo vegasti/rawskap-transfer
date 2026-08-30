@@ -1,6 +1,6 @@
 [package]
 name = "rawskap-transfer"
-version = "0.1.3"
+version = "0.1.4"
 description = "Rawskap Transfer - store overforinger til og fra skapet"
 authors = ["Raw Studios AS"]
 license = ""
@@ -26,6 +26,11 @@ tauri-plugin-shell = "2"
 tauri-plugin-store = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
+# Auto-oppdatering (30/8): laster ned, VERIFISERER SIGNATUR og installerer i
+# appen. Uten signaturen ville en oppdaterings-URL vært en vei rett inn på
+# maskinen — derfor nekter pluginen alt som ikke er signert med vår nøkkel.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }

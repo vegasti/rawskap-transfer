@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Rawskap Transfer",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "identifier": "no.rawstudios.rawskap-transfer",
   "build": {
     "frontendDist": "../src"
@@ -45,7 +45,8 @@
       "nsis": {
         "installerIcon": "icons/icon.ico"
       }
-    }
+    },
+    "createUpdaterArtifacts": true
   },
   "plugins": {
     "deep-link": {
@@ -54,6 +55,12 @@
           "rawskap"
         ]
       }
+    },
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFBMDlEQjkzQzJBNkQ0N0UKUldSKzFLYkNrOXNKcWkrZ3c3RGhXR3h6blhQYkRseFA5anZoRFZHWVA5dVZ1cUY5YWN0YjNLeksK",
+      "endpoints": [
+        "https://rawskap.no/api/transfer/oppdatering?ver={{current_version}}&mal={{target}}-{{arch}}"
+      ]
     }
   }
 }

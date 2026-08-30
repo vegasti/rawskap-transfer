@@ -16,6 +16,8 @@
     "core:window:allow-hide",
     "core:window:allow-set-focus",
     "core:window:allow-unminimize",
-    "deep-link:default"
+    "deep-link:default",
+    "updater:default",
+    "process:allow-restart"
   ]
 }
