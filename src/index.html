@@ -709,8 +709,18 @@
     invoke('sett_tray_tekst', { tekst }).catch(() => {});
   }
   function oppdaterLinje() {
-    const aktive = jobber.filter(j => j.status === 'laster' || j.status === 'kø').length;
-    $('overf-teller').textContent = aktive ? String(aktive) : ''; $('overf-teller').classList.toggle('skjult', !aktive);
+    // Telleren viser FILER, ikke jobber (Vegard 31/8: dro inn 107 filer og fikk
+    // «2»). Batchen er vår inndeling, ikke hans — han venter på filer. Og det er
+    // de GJENSTÅENDE som teller, ellers står den på 107 mens de går unna.
+    // Kun jobben som laster har delvis framdrift; køede jobber har ingen ferdige,
+    // så de slipper unna med lengden og telleren blir ikke dyrere med tusenvis
+    // av filer i kø.
+    const igjen = jobber.reduce((s, j) => {
+      const n = j.filer ? j.filer.length : 0;
+      if (j.status === 'laster') return s + (n - jobbTall(j).ferdig);
+      return j.status === 'kø' ? s + n : s;
+    }, 0);
+    $('overf-teller').textContent = igjen ? String(igjen) : ''; $('overf-teller').classList.toggle('skjult', !igjen);
     $('overf-avbryt').classList.toggle('skjult', !aktiv);
     if (aktiv) {
       const k = jobbTall(aktiv); $('overf-bar').style.width = k.total ? `${Math.min(100, k.hentet / k.total * 100)}%` : '0%';
