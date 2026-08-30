@@ -503,6 +503,20 @@ async fn fil_xxh64_meld(sti: &Path, meld: Option<(&AppHandle, &str, u64)>) -> Re
     Ok(format!("{:016x}", h.digest()))
 }
 
+/// Starter en fersk multipart og gir resume-tilstanden tilbake.
+/// Egen funksjon fordi den kalles to steder: ved ny opplasting, og når en
+/// gjenopptatt opplasting viser seg å være død på serveren (30/8).
+async fn multipart_start(k: &reqwest::Client, portal: &str, navn: &str, mime: &str, bytes: u64, sist: u64, mappe_id: &str) -> Result<Resume, String> {
+    let resp = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "multipart-start", "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) })).send().await.map_err(|e| format!("{e}"))?;
+    let st = resp.status().as_u16();
+    let d: serde_json::Value = resp.json().await.map_err(|e| format!("{e}"))?;
+    if st == 401 || st == 403 { return Err("Ikke tilgang — logg inn på nytt".into()); }
+    let (uid, key) = match (d["uploadId"].as_str(), d["originalKey"].as_str()) { (Some(u), Some(kk)) => (u.to_string(), kk.to_string()), _ => return Err(d["error"].as_str().unwrap_or("multipart-start feilet").to_string()) };
+    // Serveren tilbyr en presignert URL for avspillingsproxyen (kun video).
+    // Den lagres i resume-fila så en gjenopptatt opplasting ikke mister den.
+    Ok(Resume { upload_id: uid, original_key: key, mappe_id: mappe_id.to_string(), bytes, deler: vec![], proxy_put: d["proxyPutUrl"].as_str().unwrap_or("").to_string() })
+}
+
 async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &Arc<AtomicBool>, struper: Arc<Struper>, navn: &str, mime: &str, bytes: u64, sist: u64) -> Result<(String, u64, String), String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let rsti = resume_sti(&fil.sti, bytes, sist);
@@ -511,22 +525,22 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
     // et lite oyeblikk der ingen bytes gaar. Si det, i stedet for a staa pa 0.
     let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: 0, total: bytes, status: "kobler".into(), feil: None });
     if r.upload_id.is_empty() {
-        let resp = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "multipart-start", "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) })).send().await.map_err(|e| format!("{e}"))?;
-        let st = resp.status().as_u16();
-        let d: serde_json::Value = resp.json().await.map_err(|e| format!("{e}"))?;
-        if st == 401 || st == 403 { return Err("Ikke tilgang — logg inn på nytt".into()); }
-        let (uid, key) = match (d["uploadId"].as_str(), d["originalKey"].as_str()) { (Some(u), Some(kk)) => (u.to_string(), kk.to_string()), _ => return Err(d["error"].as_str().unwrap_or("multipart-start feilet").to_string()) };
-        // Serveren tilbyr en presignert URL for avspillingsproxyen (kun video).
-        // Den lagres i resume-fila så en gjenopptatt opplasting ikke mister den.
-        r = Resume { upload_id: uid, original_key: key, mappe_id: mappe_id.to_string(), bytes, deler: vec![], proxy_put: d["proxyPutUrl"].as_str().unwrap_or("").to_string() };
+        r = multipart_start(k, portal, navn, mime, bytes, sist, mappe_id).await?;
         resume_skriv(&rsti, &r);
     }
     let antall = ((bytes + DEL_BYTES - 1) / DEL_BYTES) as u32;
-    let ferdige: std::collections::HashSet<u32> = r.deler.iter().map(|(n, _)| *n).collect();
-    let mut hentet = ferdige.len() as u64 * DEL_BYTES;
-    if hentet > bytes { hentet = bytes; }
-    let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet, total: bytes, status: "laster".into(), feil: None });
     let mut f = tokio::fs::File::open(&fil.sti).await.map_err(|e| format!("{e}"))?;
+    let mut hentet;
+    // ⚠ DØD OPPLASTING (30/8): kjenner ikke serveren opplastingen igjen, er
+    // resume-tilstanden verdiløs — og før dette var fila da PERMANENT brekt:
+    // hvert nytt forsøk leste den samme døde nøkkelen fra resume-fila og ga
+    // opp med en gang. Nå starter vi friskt i stedet. Én gang, så en server
+    // som avviser alt ikke blir en evig løkke.
+    let mut omstart_brukt = false;
+    'omstart: loop {
+    let ferdige: std::collections::HashSet<u32> = r.deler.iter().map(|(n, _)| *n).collect();
+    hentet = ((ferdige.len() as u64) * DEL_BYTES).min(bytes);
+    let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet, total: bytes, status: "laster".into(), feil: None });
     // Presigner deler i bolker på 20 (URL-ene lever 1 t).
     let mangler: Vec<u32> = (1..=antall).filter(|n| !ferdige.contains(n)).collect();
     for bolk in mangler.chunks(20) {
@@ -534,7 +548,16 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
         let resp = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "multipart-deler", "originalKey": r.original_key, "uploadId": r.upload_id, "deler": bolk })).send().await.map_err(|e| format!("{e}"))?;
         let d: serde_json::Value = resp.json().await.map_err(|e| format!("{e}"))?;
         let urler: std::collections::HashMap<u32, String> = d["deler"].as_array().map(|a| a.iter().filter_map(|x| Some((x["nr"].as_u64()? as u32, x["url"].as_str()?.to_string()))).collect()).unwrap_or_default();
-        if urler.is_empty() { return Err(d["error"].as_str().unwrap_or("Kunne ikke signere deler — opplastingen kan være utløpt; prøv igjen").to_string()); }
+        if urler.is_empty() {
+            if !omstart_brukt {
+                omstart_brukt = true;
+                let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: 0, total: bytes, status: "kobler".into(), feil: None });
+                r = multipart_start(k, portal, navn, mime, bytes, sist, mappe_id).await?;
+                resume_skriv(&rsti, &r);
+                continue 'omstart;
+            }
+            return Err(d["error"].as_str().unwrap_or("Kunne ikke signere deler — opplastingen kan være utløpt; prøv igjen").to_string());
+        }
         for nr in bolk {
             if avbryt.load(Ordering::Relaxed) { return Err("Avbrutt".into()); }
             let url = urler.get(nr).ok_or("mangler URL for del")?;
@@ -590,6 +613,8 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
             hentet = (hentet + len).min(bytes);
             let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet, total: bytes, status: "laster".into(), feil: None });
         }
+    }
+    break;
     }
     // Sett sammen. R2 bruker maalbar tid pa a lime sammen 100+ deler — det er
     // her «star lenge pa 100 %» begynner.
