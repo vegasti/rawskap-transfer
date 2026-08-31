@@ -1225,6 +1225,47 @@ fn avbryt(tilstand: State<'_, Tilstand>) {
     tilstand.avbryt.store(true, Ordering::Relaxed);
 }
 
+/// MANUELL PROXY-LENKING (0.2.0): brukeren peker på en lokal fil som skal bli
+/// avspillingskopi for et asset som alt ligger i skapet — veien for videoene
+/// automatikken bommer på (egne mappenavn, proxy på annen disk, ProRes RAW
+/// lastet opp før proxyen fantes). Samme enkoder/remux-løype som ved
+/// opplasting; serveren eier nøkkelen og «fyll bare tomt»-regelen for plakat.
+#[tauri::command]
+async fn lenk_proxy(app: AppHandle, portal: String, nokkel: String, asset_id: String, sti: String) -> Result<serde_json::Value, String> {
+    let portal = portal.trim_end_matches('/').to_string();
+    let k = klient(&nokkel)?;
+    let bare = reqwest::Client::builder().build().map_err(|e| format!("{e}"))?;
+    let r = k.post(format!("{}/api/rawskap/opplasting", portal))
+        .json(&serde_json::json!({ "action": "proxy-lenk-start", "id": asset_id })).send().await.map_err(|e| format!("{e}"))?;
+    let d: serde_json::Value = r.json().await.map_err(|e| format!("{e}"))?;
+    let put = d["proxyPutUrl"].as_str().ok_or_else(|| d["error"].as_str().unwrap_or("fikk ikke signert opplasting").to_string())?.to_string();
+    let fasit = d["varighet"].as_f64().unwrap_or(0.0);
+    let har_plakat = d["harPlakat"].as_bool().unwrap_or(true);
+    // Den valgte fila må kunne leses og dekke klippet — samme krav som
+    // automatikken stiller til sine kandidater.
+    let (_, pe) = ffmpeg_ut(&app, &["-hide_banner".into(), "-i".into(), sti.clone()]).await.unwrap_or_default();
+    if probe_ubrukelig(&pe) { return Err("Fila kan ikke leses som video".into()); }
+    let p_var = parse_varighet(&pe);
+    if fasit > 0.0 && p_var > 0.0 && p_var < fasit * 0.9 {
+        return Err(format!("Proxyen dekker bare {:.0} av {:.0} sekunder — er det riktig fil?", p_var, fasit));
+    }
+    let (w, _) = parse_dim(&pe);
+    let remux = pe.contains("Video: h264") && w > 0 && w <= 1920;
+    let n = lag_og_last_opp_proxy(&app, &bare, &sti, &put, &sti, 0, if fasit > 0.0 { fasit } else { p_var }, remux).await
+        .ok_or("Fikk ikke laget avspillingskopi av fila")?;
+    let mut body = serde_json::json!({ "action": "proxy-lenk-fullfor", "id": asset_id, "proxyStorrelse": n });
+    // Mangler kortet plakat, kan den lokale proxyen levere den også.
+    if !har_plakat {
+        let vi = video_info(&app, &sti).await;
+        if let Some(po) = vi.poster { body["posterBase64"] = serde_json::json!(po); }
+        if let Some(sp) = vi.sprite { body["spriteBase64"] = serde_json::json!(sp); body["spriteFrames"] = serde_json::json!(vi.frames); }
+    }
+    let r = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&body).send().await.map_err(|e| format!("{e}"))?;
+    let d: serde_json::Value = r.json().await.unwrap_or(serde_json::json!({}));
+    if !d["ok"].as_bool().unwrap_or(false) { return Err(d["error"].as_str().unwrap_or("Serveren avviste proxyen").to_string()); }
+    Ok(serde_json::json!({ "ok": true }))
+}
+
 /// Stopp ÉN fil i jobben som kjører; resten går videre.
 #[tauri::command]
 fn avbryt_fil(tilstand: State<'_, Tilstand>, id: String) {
@@ -1281,7 +1322,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
-        .invoke_handler(tauri::generate_handler![avbryt_fil, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![avbryt_fil, lenk_proxy, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
