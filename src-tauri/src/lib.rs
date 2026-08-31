@@ -1089,6 +1089,53 @@ async fn rydd_part_i_mappe(mappe: String, dager: u64) -> u32 {
     slettet
 }
 
+// OMDØP-MODULEN (0.2.3): regelbasert bulk rename av lokale filer. Alt går via
+// temp-navn i to hopp — det gjør case-only-endringer (NTFS ser a.jpg og A.jpg
+// som samme fil), bytter og kjeder (A→B mens B→C) til samme enkle sak.
+// Validering skjer FØR noe røres; låste filer feiler per fil og resten fortsetter.
+#[derive(serde::Deserialize)]
+struct OmdoepPar { fra: String, til: String }
+
+#[tauri::command]
+async fn omdoep(mappe: String, par: Vec<OmdoepPar>) -> Result<serde_json::Value, String> {
+    let rot = std::path::Path::new(&mappe);
+    if !rot.is_dir() { return Err("mappa finnes ikke".into()); }
+    // Fase 0: valider hele lista før noe som helst røres.
+    let mut nye = std::collections::HashSet::new();
+    let gamle: std::collections::HashSet<String> = par.iter().map(|p| p.fra.to_lowercase()).collect();
+    for p in &par {
+        if p.til.is_empty() || p.til.contains(['/', '\\', '<', '>', ':', '"', '|', '?', '*']) || p.til.ends_with(['.', ' ']) {
+            return Err(format!("ugyldig navn: «{}»", p.til));
+        }
+        if !nye.insert(p.til.to_lowercase()) { return Err(format!("to filer får samme navn: «{}»", p.til)); }
+        if !rot.join(&p.fra).exists() { return Err(format!("finnes ikke lenger: «{}»", p.fra)); }
+        // Målet er opptatt — med mindre det er en av kildene (flyttes vekk i fase 1).
+        if rot.join(&p.til).exists() && !gamle.contains(&p.til.to_lowercase()) {
+            return Err(format!("«{}» finnes fra før", p.til));
+        }
+    }
+    // Fase 1: kilde → temp. Låst fil = per-fil-feil, resten fortsetter.
+    let mut temp: Vec<(usize, std::path::PathBuf)> = Vec::new();
+    let mut feil: Vec<(String, String)> = Vec::new();
+    for (i, p) in par.iter().enumerate() {
+        let t = rot.join(format!("~omd{}_{}", i, rand_suffiks()));
+        match std::fs::rename(rot.join(&p.fra), &t) {
+            Ok(()) => temp.push((i, t)),
+            Err(e) => feil.push((p.fra.clone(), format!("{e}"))),
+        }
+    }
+    // Fase 2: temp → mål. Feiler dette (skal ikke skje etter valideringen),
+    // settes fila tilbake til gammelt navn.
+    let mut omdopt: Vec<(String, String)> = Vec::new();
+    for (i, t) in temp {
+        match std::fs::rename(&t, rot.join(&par[i].til)) {
+            Ok(()) => omdopt.push((par[i].fra.clone(), par[i].til.clone())),
+            Err(e) => { let _ = std::fs::rename(&t, rot.join(&par[i].fra)); feil.push((par[i].fra.clone(), format!("{e}"))); }
+        }
+    }
+    Ok(serde_json::json!({ "omdopt": omdopt, "feil": feil }))
+}
+
 #[tauri::command]
 fn vis_i_utforsker(sti: String) -> Result<(), String> {
     let p = std::path::Path::new(&sti);
@@ -1514,7 +1561,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
-        .invoke_handler(tauri::generate_handler![avbryt_fil, les_lokal, lenk_proxy, lenk_proxy_mappe, del_mappe, last_inn, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![avbryt_fil, les_lokal, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, last_inn, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
