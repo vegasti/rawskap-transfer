@@ -1417,6 +1417,27 @@ async fn last_inn(app: AppHandle, tilstand: State<'_, Tilstand>, filer: Vec<OppF
     Ok(serde_json::json!({ "ok": ok, "feil": feil, "kopiert": kopiert }))
 }
 
+/// LOKAL BROWSER (0.2.1, Vegard: «en lokal browser ved siden av skapet man
+/// kan drag+drop?»): ETT nivå av en lokal mappe — panelet skal føles som
+/// Utforsker, ikke som en skanning. les_mappe er rekursiv og ville lest hele
+/// treet ved hver klikk; denne leser bare det du ser.
+#[tauri::command]
+async fn les_lokal(sti: String) -> Result<serde_json::Value, String> {
+    let mut mapper: Vec<String> = Vec::new();
+    let mut filer: Vec<serde_json::Value> = Vec::new();
+    let mut rd = tokio::fs::read_dir(&sti).await.map_err(|e| format!("{e}"))?;
+    while let Some(e) = rd.next_entry().await.map_err(|e| format!("{e}"))? {
+        let navn = e.file_name().to_string_lossy().to_string();
+        if navn.starts_with('.') || navn.starts_with('$') { continue; }
+        let Ok(md) = e.metadata().await else { continue };
+        if md.is_dir() { mapper.push(navn); }
+        else { filer.push(serde_json::json!({ "navn": navn, "bytes": md.len() })); }
+    }
+    mapper.sort_by_key(|a| a.to_lowercase());
+    filer.sort_by(|a, b| a["navn"].as_str().unwrap_or("").to_lowercase().cmp(&b["navn"].as_str().unwrap_or("").to_lowercase()));
+    Ok(serde_json::json!({ "mapper": mapper, "filer": filer }))
+}
+
 /// Stopp ÉN fil i jobben som kjører; resten går videre.
 #[tauri::command]
 fn avbryt_fil(tilstand: State<'_, Tilstand>, id: String) {
@@ -1473,7 +1494,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
-        .invoke_handler(tauri::generate_handler![avbryt_fil, lenk_proxy, lenk_proxy_mappe, del_mappe, last_inn, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![avbryt_fil, les_lokal, lenk_proxy, lenk_proxy_mappe, del_mappe, last_inn, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
