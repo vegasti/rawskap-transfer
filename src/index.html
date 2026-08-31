@@ -1193,9 +1193,13 @@
         });
         await window.__TAURI__.process.relaunch();
       } catch (e) {
-        // Ikke skjul feilen — men gi en vei videre.
+        // Ikke skjul feilen — men gi en vei videre. (31/8: signaturavvisning
+        // pga. CDN-cache så nøyaktig sånn ut — feilen MÅ være synlig, ellers
+        // jakter vi spøkelser.)
+        console.error('oppdatering feilet:', e);
         knapp.disabled = false;
         knapp.textContent = opprinnelig;
+        knapp.title = String(e?.message || e).slice(0, 300);
         if (url) openShell(url);
       }
     }
