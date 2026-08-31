@@ -363,6 +363,21 @@ fn parse_dim(stderr: &str) -> (u32, u32) {
 /// passerte den gamle vakta på 10 kB og ble lastet opp og merket «klar».
 /// En proxy som lyver om at den er klippet er verre enn ingen proxy: da vet
 /// serveren i det minste at fila trenger behandling.
+/// Fikk ffmpeg i det hele tatt åpnet videostrømmen?
+///
+/// ⚠ 31/8: på DJIs ProRes RAW gir mov-demukseren bare 2 pakker — men den LESER
+/// HELE FILA først (målt: 13,49 av 13,50 GB, 65 s). Appen kjørte fire slike
+/// passeringer per klipp — probe, proxy, plakat, sprite — altså ~76 GB lesing
+/// over nettverket for å produsere ingenting. Vegards A013C0036 (19 GB) sto
+/// to timer i etterbehandling mens de andre opplastingene delte båndbredden.
+///
+/// Probe-linja sier det rett ut, og den er billig. Sier den dette, hopper vi
+/// over ALT lokalt arbeid og lar serveren om fila. Bredde/høyde/varighet
+/// leses fortsatt ut — de kommer fra containeren og er riktige.
+fn probe_ubrukelig(stderr: &str) -> bool {
+    stderr.contains("Could not find codec parameters")
+}
+
 async fn proxy_holder(app: &AppHandle, ut: &str, kilde: f64) -> bool {
     if tokio::fs::metadata(ut).await.map(|m| m.len() <= 10_000).unwrap_or(true) { return false; }
     if kilde <= 0.0 { return true; }  // ukjent kilde — da er størrelsen alt vi har, som før
@@ -376,6 +391,10 @@ async fn video_info(app: &AppHandle, sti: &str) -> VideoInfo {
     let (_, err) = match ffmpeg_ut(app, &["-hide_banner".into(), "-i".into(), sti.into()]).await { Ok(x) => x, Err(_) => return v };
     v.varighet = parse_varighet(&err);
     let (w, h) = parse_dim(&err); v.bredde = w; v.hoyde = h;
+    // Målene og varigheten er gode (de kommer fra containeren) — men å be om
+    // bilder ut av en strøm ffmpeg ikke fikk åpnet koster en full gjennomlesing
+    // per forsøk og gir ingenting.
+    if probe_ubrukelig(&err) { return v; }
     // Poster: midten, men maks 5 s inn (som nettleseren). Maks 1280 bred.
     let t = if v.varighet > 0.0 { (v.varighet / 2.0).min(5.0) } else { 1.0 };
     // Binær ut via stdout ødelegges av shell-pluginens tekstbehandling (22/8:
@@ -417,6 +436,7 @@ async fn lag_og_last_opp_proxy(app: &AppHandle, bare: &reqwest::Client, sti: &st
     // Fasiten vi måler resultatet mot.
     let kilde_varighet = {
         let (_, e) = ffmpeg_ut(app, &["-hide_banner".into(), "-i".into(), sti.into()]).await.unwrap_or_default();
+        if probe_ubrukelig(&e) { return None; }
         parse_varighet(&e)
     };
 
