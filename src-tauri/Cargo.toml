@@ -1,6 +1,6 @@
 [package]
 name = "rawskap-transfer"
-version = "0.2.1"
+version = "0.2.2"
 description = "Rawskap Transfer - store overforinger til og fra skapet"
 authors = ["Raw Studios AS"]
 license = ""

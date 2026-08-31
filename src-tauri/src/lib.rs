@@ -1423,6 +1423,26 @@ async fn last_inn(app: AppHandle, tilstand: State<'_, Tilstand>, filer: Vec<OppF
 /// treet ved hver klikk; denne leser bare det du ser.
 #[tauri::command]
 async fn les_lokal(sti: String) -> Result<serde_json::Value, String> {
+    // Tom sti = «Denne maskinen»: stasjonene (mac: / + /Volumes), så panelet
+    // er en ekte disk-browser fra første klikk — ikke et påtvunget mappevalg.
+    if sti.is_empty() {
+        let mut mapper: Vec<String> = Vec::new();
+        #[cfg(target_os = "windows")]
+        for b in b'A'..=b'Z' {
+            let rot = format!("{}:\\", b as char);
+            if std::path::Path::new(&rot).exists() { mapper.push(rot); }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            mapper.push("/".to_string());
+            if let Ok(mut rd) = tokio::fs::read_dir("/Volumes").await {
+                while let Ok(Some(e)) = rd.next_entry().await {
+                    if let Some(s) = e.path().to_str() { mapper.push(s.to_string()); }
+                }
+            }
+        }
+        return Ok(serde_json::json!({ "mapper": mapper, "filer": [], "rot": true }));
+    }
     let mut mapper: Vec<String> = Vec::new();
     let mut filer: Vec<serde_json::Value> = Vec::new();
     let mut rd = tokio::fs::read_dir(&sti).await.map_err(|e| format!("{e}"))?;
