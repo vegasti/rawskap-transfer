@@ -1290,6 +1290,77 @@ async fn del_mappe(portal: String, nokkel: String, mappe_id: String, navn: Strin
     Ok(serde_json::json!({ "token": token, "id": d["id"] }))
 }
 
+/// MINNEKORT-INNLASTING (0.2.0, DIT): kopier fra kort til arkiv/NAS med
+/// VERIFISERING — xxh64 regnes mens kilden leses, målet leses TILBAKE og
+/// hashes på nytt, og først når de to er like meldes fila «verifisert».
+/// Det er hele forskjellen på dette og en Explorer-kopi: etterpå VET du at
+/// arkivkopien er bit for bit lik kortet, og kortet kan formateres.
+/// Sletter ALDRI fra kortet — det er fotografens handling, ikke vår.
+#[tauri::command]
+async fn last_inn(app: AppHandle, tilstand: State<'_, Tilstand>, filer: Vec<OppFil>, maal: String) -> Result<serde_json::Value, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    tilstand.avbryt.store(false, Ordering::Relaxed);
+    if let Ok(mut s) = tilstand.avbrutte.lock() { s.clear(); }
+    let rot = PathBuf::from(&maal);
+    let mut ok = 0usize; let mut feil: Vec<serde_json::Value> = Vec::new(); let mut kopiert: Vec<serde_json::Value> = Vec::new();
+    for fil in &filer {
+        let stopp = Stopp { global: tilstand.avbryt.clone(), sett: tilstand.avbrutte.clone(), id: fil.sti.clone() };
+        let til = rot.join(&fil.relativ);
+        let res: Result<(), String> = async {
+            if let Some(d) = til.parent() { tokio::fs::create_dir_all(d).await.map_err(|e| format!("{e}"))?; }
+            // Finnes målet alt med samme størrelse? Verifiser i stedet for å
+            // kopiere — gjenopptak av en avbrutt innlasting skal være gratis.
+            let hopp = tokio::fs::metadata(&til).await.map(|m| m.len() == fil.bytes).unwrap_or(false);
+            let mut kilde_hash = xxhash_rust::xxh64::Xxh64::new(0);
+            if !hopp {
+                let mut f = tokio::fs::File::open(&fil.sti).await.map_err(|e| format!("{e}"))?;
+                let tmp = til.with_extension("rawskap-tmp");
+                let mut u = tokio::fs::File::create(&tmp).await.map_err(|e| format!("{e}"))?;
+                let mut buf = vec![0u8; 1 << 20];
+                let mut lest: u64 = 0;
+                let mut sist = std::time::Instant::now();
+                loop {
+                    if stopp.av() { let _ = tokio::fs::remove_file(&tmp).await; return Err("Avbrutt".into()); }
+                    let n = f.read(&mut buf).await.map_err(|e| format!("{e}"))?;
+                    if n == 0 { break; }
+                    kilde_hash.update(&buf[..n]);
+                    u.write_all(&buf[..n]).await.map_err(|e| format!("{e}"))?;
+                    lest += n as u64;
+                    if sist.elapsed().as_millis() > 150 { sist = std::time::Instant::now(); let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: lest, total: fil.bytes, status: "laster".into(), feil: None }); }
+                }
+                u.flush().await.map_err(|e| format!("{e}"))?;
+                drop(u);
+                tokio::fs::rename(&tmp, &til).await.map_err(|e| format!("{e}"))?;
+            } else {
+                // Hopp = les kilden likevel for hash — verifiseringen er poenget.
+                let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: 0, total: fil.bytes, status: "hash".into(), feil: None });
+                let h = fil_xxh64(std::path::Path::new(&fil.sti)).await?;
+                kilde_hash = xxhash_rust::xxh64::Xxh64::new(0);
+                // fil_xxh64 gir hex-streng; sammenlign strenger i stedet.
+                let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: fil.bytes, total: fil.bytes, status: "hash".into(), feil: None });
+                let m = fil_xxh64(&til).await?;
+                if h != m { return Err("Sjekksum ulik — arkivkopien er IKKE lik kortet".into()); }
+                let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: fil.bytes, total: fil.bytes, status: "verifisert".into(), feil: None });
+                return Ok(());
+            }
+            // Les målet TILBAKE og hash — det er verifiseringen.
+            let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: fil.bytes, total: fil.bytes, status: "hash".into(), feil: None });
+            let m = fil_xxh64(&til).await?;
+            if format!("{:016x}", kilde_hash.digest()) != m {
+                let _ = tokio::fs::remove_file(&til).await;
+                return Err("Sjekksum ulik — kopien ble slettet, prøv igjen".into());
+            }
+            let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: fil.bytes, total: fil.bytes, status: "verifisert".into(), feil: None });
+            Ok(())
+        }.await;
+        match res {
+            Ok(()) => { ok += 1; kopiert.push(serde_json::json!({ "sti": til.to_string_lossy(), "relativ": fil.relativ, "bytes": fil.bytes })); }
+            Err(e) => { let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: 0, total: fil.bytes, status: "feil".into(), feil: Some(e.clone()) }); feil.push(serde_json::json!({ "id": fil.sti, "feil": e })); }
+        }
+    }
+    Ok(serde_json::json!({ "ok": ok, "feil": feil, "kopiert": kopiert }))
+}
+
 /// Stopp ÉN fil i jobben som kjører; resten går videre.
 #[tauri::command]
 fn avbryt_fil(tilstand: State<'_, Tilstand>, id: String) {
@@ -1346,7 +1417,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
-        .invoke_handler(tauri::generate_handler![avbryt_fil, lenk_proxy, del_mappe, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![avbryt_fil, lenk_proxy, del_mappe, last_inn, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
