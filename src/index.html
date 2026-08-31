@@ -1005,10 +1005,17 @@
     const j = { id: 'j' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type, navn, mappeId, filer: (type === 'opp' || type === 'inn') ? filer : filer.map(f => ({ id: f.id, filnavn: f.filnavn, bytes: f.bytes, sti: f.sti || '', xxh64: f.xxh64 || '', url: f.url || '' })), maal: erMappe && (mappeId || filer.some(f => f.url)) ? `${maal}/${navn.replace(/[\\/:*?"<>|]+/g, '_')}` : maal, status: 'kø', ok: 0, feil: [], logg: !!P.logg, konflikt: P.konflikt, ...ekstra };
     jobber.unshift(j); tegnJobber(); lagreKo(); kjørNeste();
   }
+  // PREEMPT-OPPRYDDING (1/9, Vegard: «disse kom som avbrutt når jeg kjørte en
+  // annen fram i køen»): forbikjøring/pause avbryter filene i lufta (resume
+  // gjør fortsettelsen gratis), men fil-radene ble stående på «✕ Avbrutt» —
+  // som leses som permanent feil. Når jobben skal FORTSETTE er sannheten
+  // «venter»: fjern tilstanden for alt uferdig, så radene sier nettopp det.
+  const nullstillUferdige = (j) => { for (const f of j.filer) { const id = f.id || f.sti; const s = filTilstand.get(id); if (s && !['ferdig', 'hoppet', 'verifisert', 'hoppetNavn', 'somProxy', 'pausetFil'].includes(s.status)) filTilstand.delete(id); } };
   async function kjørNeste() {
     if (aktiv) return;
     const j = jobber.find(x => x.status === 'kø'); if (!j) { oppdaterLinje(); return; }
     aktiv = j; j.status = 'laster'; j.start = Date.now();
+    nullstillUferdige(j); // også Prøv igjen: gamle feiltekster skal ikke bli stående mens fila faktisk prøves på nytt
     // Etter app-omstart er filTilstand tom — gi hopp-merkede rader status, så
     // de ikke står som «venter» på en jobb som aldri kommer til å sende dem.
     if (j.type === 'opp') for (const f of j.filer) if (f.hopp && !filTilstand.get(f.sti)) filTilstand.set(f.sti, { hentet: f.bytes || 0, total: f.bytes || 0, status: 'hoppet' });
@@ -1057,7 +1064,7 @@
       }
       // PAUSE: brukeren stoppet den selv — det er ikke en feil, og skal
       // hverken varsles eller se rødt ut. Resume-filene gjør «Fortsett» gratis.
-      if (pausePaa === j) { pausePaa = null; j.status = 'pauset'; j.feil = []; }
+      if (pausePaa === j) { pausePaa = null; j.status = 'pauset'; j.feil = []; nullstillUferdige(j); }
       if (j.status !== 'pauset' && j.status !== 'kø') loggHistorikk(j, jobbTall(j));
       // PRØV IGJEN BARE FEILEDE (etappe 4): merk det som kom i mål, så en ny
       // runde slipper å lese sjekksum av 900 GB som allerede står i skapet.
@@ -1072,7 +1079,7 @@
     if (j.synkId) { const feilet = new Set((j.feil || []).map(x => x.id)); const ok = j.filer.filter(f => !feilet.has(f.sti)); const ikke = j.filer.filter(f => feilet.has(f.sti)); if (ok.length) invoke('synk_merk', { id: j.synkId, filer: ok.map(f => ({ sti: f.sti, relativ: f.relativ, bytes: f.bytes })), ok: true }).catch(() => {}); if (ikke.length) invoke('synk_merk', { id: j.synkId, filer: ikke.map(f => ({ sti: f.sti, relativ: f.relativ, bytes: f.bytes })), ok: false }).catch(() => {}); }
     if (j.status === 'ferdig' && P.vFerdig) varsle(t.varselFerdig, `${j.navn} · ${antFiler(j.filer.length)}`);
     if (j.status === 'feil' && P.vFeil) varsle(t.varselFeil, `${j.navn} · ${j.feil.length} ${t.feilet}`);
-    if (ventPaa === j) { ventPaa = null; j.status = 'kø'; j.feil = []; }
+    if (ventPaa === j) { ventPaa = null; j.status = 'kø'; j.feil = []; nullstillUferdige(j); }
     aktiv = null; tegnJobber(); lagreKo(); kjørNeste();
   }
   await listen('framdrift', ev => {
