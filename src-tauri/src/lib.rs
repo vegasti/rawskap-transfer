@@ -1266,6 +1266,30 @@ async fn lenk_proxy(app: AppHandle, portal: String, nokkel: String, asset_id: St
     Ok(serde_json::json!({ "ok": true }))
 }
 
+/// DEL FRA APPEN (0.2.0): opprett en LEVENDE mappe-deling — samme API som
+/// portalen bruker (mappeRef = innholdet unioneres ved visning, ikke
+/// snapshot), og kundens egne delings-defaults hentes først så en deling
+/// laget her ser ut som en deling laget der.
+#[tauri::command]
+async fn del_mappe(portal: String, nokkel: String, mappe_id: String, navn: String) -> Result<serde_json::Value, String> {
+    let portal = portal.trim_end_matches('/').to_string();
+    let k = klient(&nokkel)?;
+    let mut body = serde_json::json!({});
+    if let Ok(r) = k.get(format!("{}/api/rawskap/deling-defaults", portal)).send().await {
+        if let Ok(d) = r.json::<serde_json::Value>().await {
+            if let Some(o) = d["defaults"].as_object() { body = serde_json::Value::Object(o.clone()); }
+        }
+    }
+    body["navn"] = serde_json::json!(navn);
+    body["mappeRef"] = serde_json::json!(mappe_id);
+    body["bildeIds"] = serde_json::json!([]);
+    let r = k.post(format!("{}/api/rawskap/del", portal)).json(&body).send().await.map_err(|e| format!("{e}"))?;
+    let d: serde_json::Value = r.json().await.map_err(|e| format!("{e}"))?;
+    let token = d["token"].as_str().unwrap_or("").to_string();
+    if token.is_empty() { return Err(d["error"].as_str().unwrap_or("Kunne ikke opprette deling").to_string()); }
+    Ok(serde_json::json!({ "token": token, "id": d["id"] }))
+}
+
 /// Stopp ÉN fil i jobben som kjører; resten går videre.
 #[tauri::command]
 fn avbryt_fil(tilstand: State<'_, Tilstand>, id: String) {
@@ -1322,7 +1346,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
-        .invoke_handler(tauri::generate_handler![avbryt_fil, lenk_proxy, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![avbryt_fil, lenk_proxy, del_mappe, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
