@@ -84,18 +84,39 @@ impl Stopp {
     }
 }
 
-/// Enkel struping: hold gjennomsnittsfarten under taket ved å sove når vi
-/// ligger foran skjema (token-bucket-lite, målt fra jobbstart).
-struct Struper { start: std::time::Instant, bytes: AtomicU64, mbps: Arc<AtomicU64> }
+/// Struping som TOKEN-BUCKET.
+///
+/// ⚠ Den gamle regnet gjennomsnitt fra jobbstart, og det er en felle med
+/// ubegrenset minne (31/8, Vegard satte 75 Mb/s og fikk 437 kB/s): hadde jobben
+/// alt sendt 168 GB ubegrenset, ville de tatt 5 timer på 75 Mb/s — men jobben
+/// hadde kjørt én. Struperen mente den lå TIMER foran skjema og sov taket sitt
+/// på 2 s ved hver eneste bit, i praksis full stopp. Samme felle motsatt vei:
+/// en jobb som har ligget stille en stund ville fått lov til å bruse av gårde.
+///
+/// En bøtte fylles med taket som rate og RENNER OVER etter ett sekund. Da har
+/// den ingen hukommelse utover den burst-en, og å endre grensa midt i en jobb
+/// virker umiddelbart — som brukeren forventer av et felt hen nettopp skrev i.
+struct Struper { mbps: Arc<AtomicU64>, bøtte: tokio::sync::Mutex<(std::time::Instant, f64)> }
 impl Struper {
-    fn ny(mbps: Arc<AtomicU64>) -> Arc<Self> { Arc::new(Self { start: std::time::Instant::now(), bytes: AtomicU64::new(0), mbps }) }
+    fn ny(mbps: Arc<AtomicU64>) -> Arc<Self> {
+        Arc::new(Self { mbps, bøtte: tokio::sync::Mutex::new((std::time::Instant::now(), 0.0)) })
+    }
     async fn tell(&self, n: u64) {
         let tak = self.mbps.load(Ordering::Relaxed);
-        let sum = self.bytes.fetch_add(n, Ordering::Relaxed) + n;
         if tak == 0 { return; }
-        let skal_ha_brukt = (sum as f64 * 8.0) / (tak as f64 * 1_000_000.0); // sekunder
-        let brukt = self.start.elapsed().as_secs_f64();
-        if skal_ha_brukt > brukt { tokio::time::sleep(std::time::Duration::from_secs_f64((skal_ha_brukt - brukt).min(2.0))).await; }
+        let bps = tak as f64 * 1_000_000.0 / 8.0; // Mb/s → bytes/s
+        let vent = {
+            let mut b = self.bøtte.lock().await;
+            let na = std::time::Instant::now();
+            // Fyll på for tiden som gikk, men aldri mer enn ett sekunds burst.
+            b.1 = (b.1 + na.duration_since(b.0).as_secs_f64() * bps).min(bps);
+            b.0 = na;
+            b.1 -= n as f64;
+            // Negativ saldo = vi lånte; hver låner sover for sin egen andel, så
+            // parallelle overføringer deler ventetiden i stedet for å doble den.
+            if b.1 < 0.0 { -b.1 / bps } else { 0.0 }
+        };
+        if vent > 0.0 { tokio::time::sleep(std::time::Duration::from_secs_f64(vent.min(5.0))).await; }
     }
 }
 
