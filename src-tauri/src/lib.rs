@@ -62,8 +62,26 @@ fn chrono_lite() -> String {
 #[derive(Default)]
 pub struct Tilstand {
     avbryt: Arc<AtomicBool>,
+    // Enkeltfiler brukeren har stoppet i den AKTIVE jobben (31/8, Vegard:
+    // «kan vi avbryte enkeltfiler?»). Køede jobber trenger ikke serveren i
+    // det hele tatt — de fjernes bare fra lista før de starter.
+    // Nøkkelen er samme id som framdrift-hendelsene bruker: stien for
+    // opplasting, asset-id for nedlasting.
+    avbrutte: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     ned_mbps: Arc<AtomicU64>, // 0 = ubegrenset
     opp_mbps: Arc<AtomicU64>,
+}
+
+/// «Skal denne fila stoppe?» — enten fordi HELE jobben er avbrutt, eller fordi
+/// nettopp denne fila er krysset ut. Ett spørsmål, så alle stedene som før
+/// bare kjente til jobb-avbrudd nå også lyder enkeltfila.
+#[derive(Clone)]
+struct Stopp { global: Arc<AtomicBool>, sett: Arc<std::sync::Mutex<std::collections::HashSet<String>>>, id: String }
+impl Stopp {
+    fn av(&self) -> bool {
+        self.global.load(Ordering::Relaxed)
+            || self.sett.lock().map(|s| s.contains(&self.id)).unwrap_or(false)
+    }
 }
 
 /// Enkel struping: hold gjennomsnittsfarten under taket ved å sove når vi
@@ -134,7 +152,7 @@ async fn last_ned_en(
     portal: &str,
     fil: &Fil,
     rot: &Path,
-    avbryt: &AtomicBool,
+    avbryt: &Stopp,
     struper: &Struper,
     konflikt: &str,
 ) -> Result<(), String> {
@@ -210,7 +228,7 @@ async fn last_ned_en(
     let mut strom = resp.bytes_stream();
     let mut sist_meldt = std::time::Instant::now();
     while let Some(bit) = strom.next().await {
-        if avbryt.load(Ordering::Relaxed) { return Err("Avbrutt".into()); }
+        if avbryt.av() { return Err("Avbrutt".into()); }
         let bit = bit.map_err(|e| format!("{e}"))?;
         f.write_all(&bit).await.map_err(|e| format!("{e}"))?;
         struper.tell(bit.len() as u64).await;
@@ -256,22 +274,28 @@ async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
     tokio::fs::create_dir_all(&rot).await.map_err(|e| format!("{e}"))?;
     let sem = Arc::new(Semaphore::new(parallell.clamp(1, 8)));
     let avbryt = tilstand.avbryt.clone();
+    // Ny jobb = blanke ark for enkeltfil-avbrudd. Bare den AKTIVE jobbens
+    // filer havner her, så det er trygt å tømme når en ny jobb starter —
+    // ellers ville en fil man stoppet i går blitt stoppet igjen i dag.
+    let avbrutte = tilstand.avbrutte.clone();
+    if let Ok(mut s) = avbrutte.lock() { s.clear(); }
     let struper = Struper::ny(tilstand.ned_mbps.clone());
     let mut jobber = Vec::new();
     for fil in filer {
-        let (app, k, bare, portal, rot, sem, avbryt, loggen, struper) = (app.clone(), k.clone(), bare.clone(), portal.clone(), rot.clone(), sem.clone(), avbryt.clone(), loggen.clone(), struper.clone());
+        let (app, k, bare, portal, rot, sem, loggen, struper) = (app.clone(), k.clone(), bare.clone(), portal.clone(), rot.clone(), sem.clone(), loggen.clone(), struper.clone());
+        let avbryt = Stopp { global: avbryt.clone(), sett: avbrutte.clone(), id: fil.id.clone() };
         let konflikt = konflikt.clone();
         jobber.push(tokio::spawn(async move {
             let _p = sem.acquire().await;
             let sti = if fil.sti.is_empty() { rot.join(trygt_navn(&fil.filnavn)) } else { rot.join(&fil.sti).join(trygt_navn(&fil.filnavn)) };
             if let Some(l) = &loggen { l.skriv(&format!("🚀 Startet                | ID: {} | {}", fil.id, sti.display())).await; }
-            if avbryt.load(Ordering::Relaxed) { return (fil.id.clone(), Err::<(), String>("Avbrutt".into())); }
+            if avbryt.av() { return (fil.id.clone(), Err::<(), String>("Avbrutt".into())); }
             let _ = app.emit("framdrift", Framdrift { id: fil.id.clone(), hentet: 0, total: fil.bytes, status: "laster".into(), feil: None });
             // Inntil 3 forsøk per fil — resume gjør hvert forsøk billig.
             let mut res = Err("".into());
             for _ in 0..3 {
                 res = last_ned_en(&app, &k, &bare, &portal, &fil, &rot, &avbryt, &struper, &konflikt).await;
-                if res.is_ok() || avbryt.load(Ordering::Relaxed) { break; }
+                if res.is_ok() || avbryt.av() { break; }
                 tokio::time::sleep(std::time::Duration::from_millis(800)).await;
             }
             if let Err(e) = &res {
@@ -555,7 +579,7 @@ async fn multipart_start(k: &reqwest::Client, portal: &str, navn: &str, mime: &s
     Ok(Resume { upload_id: uid, original_key: key, mappe_id: mappe_id.to_string(), bytes, deler: vec![], proxy_put: d["proxyPutUrl"].as_str().unwrap_or("").to_string() })
 }
 
-async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &Arc<AtomicBool>, struper: Arc<Struper>, navn: &str, mime: &str, bytes: u64, sist: u64) -> Result<(String, u64, String), String> {
+async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &Stopp, struper: Arc<Struper>, navn: &str, mime: &str, bytes: u64, sist: u64) -> Result<(String, u64, String), String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let rsti = resume_sti(&fil.sti, bytes, sist);
     let mut r = resume_les(&rsti).filter(|r| r.bytes == bytes && r.mappe_id == mappe_id).unwrap_or_default();
@@ -597,14 +621,13 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
             return Err(d["error"].as_str().unwrap_or("Kunne ikke signere deler — opplastingen kan være utløpt; prøv igjen").to_string());
         }
         for nr in bolk {
-            if avbryt.load(Ordering::Relaxed) { return Err("Avbrutt".into()); }
+            if avbryt.av() { return Err("Avbrutt".into()); }
             let url = urler.get(nr).ok_or("mangler URL for del")?;
             let start = (*nr as u64 - 1) * DEL_BYTES;
             let len = (bytes - start).min(DEL_BYTES);
             f.seek(std::io::SeekFrom::Start(start)).await.map_err(|e| format!("{e}"))?;
             let mut buf = vec![0u8; len as usize];
             f.read_exact(&mut buf).await.map_err(|e| format!("{e}"))?;
-            struper.tell(len).await;
             // Én del = ett forsøk × 3 (ekte resume: ferdige deler røres aldri).
             //
             // ⚠ FRAMDRIFT UNDERVEIS (28/8, Vegard: «går fra 3.8 MB/s til 22 MB/s
@@ -625,11 +648,19 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
                 let b = buf.clone();
                 // Ved omforsøk starter delen på nytt fra `base` — ærlig, for
                 // bytene MÅ sendes om igjen.
-                let strom = futures_util::stream::unfold((0usize, b), |(pos, b)| async move {
+                // ⚠ STRUPING (31/8): bokføringen lå FØR PUT-en og meldte hele
+                // 64 MB-delen på én gang, mens Struper sover maks 2 s per kall.
+                // Taket ble dermed 64 MB / 2 s ≈ 32 MB/s uansett hva brukeren
+                // satte — altså ingen struping i praksis på store filer, som er
+                // nettopp de man vil dempe. Nå meldes hver 256 kB-bit, der
+                // søvnen er brøkdelen av et sekund og strupingen faktisk biter.
+                let str_bit = struper.clone();
+                let strom = futures_util::stream::unfold((0usize, b, str_bit), |(pos, b, s)| async move {
                     if pos >= b.len() { return None; }
                     let slutt = (pos + (1 << 18)).min(b.len());
+                    s.tell((slutt - pos) as u64).await;
                     let bit = bytes::Bytes::copy_from_slice(&b[pos..slutt]);
-                    Some((Ok::<bytes::Bytes, std::io::Error>(bit), (slutt, b)))
+                    Some((Ok::<bytes::Bytes, std::io::Error>(bit), (slutt, b, s)))
                 }).inspect(move |r: &Result<bytes::Bytes, std::io::Error>| {
                     if let Ok(bit) = r {
                         let sendt_na = sendt2.fetch_add(bit.len() as u64, Ordering::Relaxed) + bit.len() as u64;
@@ -698,13 +729,13 @@ async fn sikre_mappe(k: &reqwest::Client, portal: &str, rot: &str, relativ_dir: 
 }
 
 /// Fil → byte-strøm m/ teller (PUT-framdrift).
-fn fil_strom(f: tokio::fs::File, struper: Arc<Struper>, avbryt: Arc<AtomicBool>, mut tell: impl FnMut(u64) + Send + 'static) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
+fn fil_strom(f: tokio::fs::File, struper: Arc<Struper>, avbryt: Stopp, mut tell: impl FnMut(u64) + Send + 'static) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
     use tokio::io::AsyncReadExt;
     futures_util::stream::unfold((f, struper, avbryt), |(mut f, struper, avbryt)| async move {
         // Avbryt MIDT i en PUT (22/8-bug: en gjenglemt opplasting levde videre etter
         // reload og rapporterte til samme rad som den nye) — kutt strømmen, så
         // feiler PUT-en og opprydding (action avbryt) kjører.
-        if avbryt.load(Ordering::Relaxed) { return Some((Err(std::io::Error::other("Avbrutt")), (f, struper, avbryt))); }
+        if avbryt.av() { return Some((Err(std::io::Error::other("Avbrutt")), (f, struper, avbryt))); }
         let mut buf = vec![0u8; 1 << 20];
         match f.read(&mut buf).await {
             Ok(0) => None,
@@ -714,7 +745,7 @@ fn fil_strom(f: tokio::fs::File, struper: Arc<Struper>, avbryt: Arc<AtomicBool>,
     }).inspect(move |r| { if let Ok(b) = r { tell(b.len() as u64); } })
 }
 
-async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &Arc<AtomicBool>, struper: Arc<Struper>) -> Result<(), String> {
+async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &Stopp, struper: Arc<Struper>) -> Result<(), String> {
     let navn = std::path::Path::new(&fil.sti).file_name().and_then(|n| n.to_str()).unwrap_or("fil").to_string();
     let mime = mime_fra(&navn);
     let meta = tokio::fs::metadata(&fil.sti).await.map_err(|e| format!("{e}"))?;
@@ -748,7 +779,7 @@ async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Clien
         if sist_meldt.elapsed().as_millis() > 150 || t == bytes { sist_meldt = std::time::Instant::now(); let _ = app2.emit("framdrift", Framdrift { id: id.clone(), hentet: t, total: bytes, status: "laster".into(), feil: None }); }
     });
     let resp = bare.put(&url).header(reqwest::header::CONTENT_TYPE, mime).header(reqwest::header::CONTENT_LENGTH, bytes).body(reqwest::Body::wrap_stream(strom)).send().await;
-    if avbryt.load(Ordering::Relaxed) || resp.is_err() && avbryt.load(Ordering::Relaxed) {
+    if avbryt.av() || resp.is_err() && avbryt.av() {
         let _ = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "avbryt", "originalKeys": [key] })).send().await;
         return Err("Avbrutt".into());
     }
@@ -813,17 +844,20 @@ async fn last_opp(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
     let cache = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<String, String>::new()));
     let sem = Arc::new(Semaphore::new(parallell.clamp(1, 6)));
     let avbryt = tilstand.avbryt.clone();
+    let avbrutte = tilstand.avbrutte.clone();
+    if let Ok(mut s) = avbrutte.lock() { s.clear(); }
     let struper = Struper::ny(tilstand.opp_mbps.clone());
     let mut jobber = Vec::new();
     for fil in filer {
-        let (app, k, bare, portal, cache, sem, avbryt, mappe_id, struper) = (app.clone(), k.clone(), bare.clone(), portal.clone(), cache.clone(), sem.clone(), avbryt.clone(), mappe_id.clone(), struper.clone());
+        let (app, k, bare, portal, cache, sem, mappe_id, struper) = (app.clone(), k.clone(), bare.clone(), portal.clone(), cache.clone(), sem.clone(), mappe_id.clone(), struper.clone());
+        let avbryt = Stopp { global: avbryt.clone(), sett: avbrutte.clone(), id: fil.sti.clone() };
         jobber.push(tokio::spawn(async move {
             let _p = sem.acquire().await;
-            if avbryt.load(Ordering::Relaxed) { return (fil.sti.clone(), Err::<(), String>("Avbrutt".into())); }
+            if avbryt.av() { return (fil.sti.clone(), Err::<(), String>("Avbrutt".into())); }
             let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: 0, total: fil.bytes, status: "laster".into(), feil: None });
             let rel_dir = std::path::Path::new(&fil.relativ).parent().map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
             let res = match sikre_mappe(&k, &portal, &mappe_id, &rel_dir, &cache).await {
-                Ok(mid) => { let mut r = Err(String::new()); for _ in 0..2 { r = last_opp_en(&app, &k, &bare, &portal, &fil, &mid, &avbryt, struper.clone()).await; if r.is_ok() || avbryt.load(Ordering::Relaxed) { break; } } r }
+                Ok(mid) => { let mut r = Err(String::new()); for _ in 0..2 { r = last_opp_en(&app, &k, &bare, &portal, &fil, &mid, &avbryt, struper.clone()).await; if r.is_ok() || avbryt.av() { break; } } r }
                 Err(e) => Err(e),
             };
             if let Err(e) = &res { let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: 0, total: fil.bytes, status: "feil".into(), feil: Some(e.clone()) }); }
@@ -1063,6 +1097,12 @@ fn avbryt(tilstand: State<'_, Tilstand>) {
     tilstand.avbryt.store(true, Ordering::Relaxed);
 }
 
+/// Stopp ÉN fil i jobben som kjører; resten går videre.
+#[tauri::command]
+fn avbryt_fil(tilstand: State<'_, Tilstand>, id: String) {
+    if let Ok(mut s) = tilstand.avbrutte.lock() { s.insert(id); }
+}
+
 /// Lukk-til-systemkurv (22/8): når valget er på, skjules vinduet i stedet for å
 /// avslutte — synk-mapper og kø lever videre. «Avslutt» i kurv-menyen avslutter.
 static TIL_KURV: AtomicBool = AtomicBool::new(false);
@@ -1113,7 +1153,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
-        .invoke_handler(tauri::generate_handler![hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![avbryt_fil, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
