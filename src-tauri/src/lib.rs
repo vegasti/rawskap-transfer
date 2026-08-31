@@ -903,6 +903,13 @@ async fn fullfor_opplasting(app: &AppHandle, k: &reqwest::Client, portal: &str, 
     if let Some(x) = xxh { body["xxh64"] = serde_json::json!(x); }
     // Proxyen ligger alt i lageret — si fra, så slipper serveren å be Cloudflare
     // Stream (som feiler på ProRes) og Rawcode å laste ned originalen på nytt.
+    // Ingen proxy Å sende? Si HVORFOR når grunnen er at formatet ikke kan
+    // leses (ProRes RAW): serveren dropper da Stream-forsøket i stedet for å
+    // la Cloudflare hente titalls GB som uansett feiler. Proben er billig.
+    if proxy.is_none() && er_video(navn) {
+        let (_, e) = ffmpeg_ut(app, &["-hide_banner".into(), "-i".into(), fil.sti.clone()]).await.unwrap_or_default();
+        if probe_ubrukelig(&e) { body["proxyUlesbar"] = serde_json::json!(true); }
+    }
     if let Some(n) = proxy {
         // ⚠ MÅ være bit for bit lik serverens `proxyNokkel` — den avviser en
         // nøkkel den ikke selv ville laget. Reservefallet bruker det TRIMMEDE
@@ -1235,15 +1242,21 @@ async fn lenk_proxy(app: AppHandle, portal: String, nokkel: String, asset_id: St
     let portal = portal.trim_end_matches('/').to_string();
     let k = klient(&nokkel)?;
     let bare = reqwest::Client::builder().build().map_err(|e| format!("{e}"))?;
+    lenk_en(&app, &k, &bare, &portal, &asset_id, &sti).await?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+async fn lenk_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, asset_id: &str, sti: &str) -> Result<(), String> {
     let r = k.post(format!("{}/api/rawskap/opplasting", portal))
         .json(&serde_json::json!({ "action": "proxy-lenk-start", "id": asset_id })).send().await.map_err(|e| format!("{e}"))?;
+
     let d: serde_json::Value = r.json().await.map_err(|e| format!("{e}"))?;
     let put = d["proxyPutUrl"].as_str().ok_or_else(|| d["error"].as_str().unwrap_or("fikk ikke signert opplasting").to_string())?.to_string();
     let fasit = d["varighet"].as_f64().unwrap_or(0.0);
     let har_plakat = d["harPlakat"].as_bool().unwrap_or(true);
     // Den valgte fila må kunne leses og dekke klippet — samme krav som
     // automatikken stiller til sine kandidater.
-    let (_, pe) = ffmpeg_ut(&app, &["-hide_banner".into(), "-i".into(), sti.clone()]).await.unwrap_or_default();
+    let (_, pe) = ffmpeg_ut(app, &["-hide_banner".into(), "-i".into(), sti.to_string()]).await.unwrap_or_default();
     if probe_ubrukelig(&pe) { return Err("Fila kan ikke leses som video".into()); }
     let p_var = parse_varighet(&pe);
     if fasit > 0.0 && p_var > 0.0 && p_var < fasit * 0.9 {
@@ -1251,19 +1264,62 @@ async fn lenk_proxy(app: AppHandle, portal: String, nokkel: String, asset_id: St
     }
     let (w, _) = parse_dim(&pe);
     let remux = pe.contains("Video: h264") && w > 0 && w <= 1920;
-    let n = lag_og_last_opp_proxy(&app, &bare, &sti, &put, &sti, 0, if fasit > 0.0 { fasit } else { p_var }, remux).await
+    let n = lag_og_last_opp_proxy(app, bare, sti, &put, sti, 0, if fasit > 0.0 { fasit } else { p_var }, remux).await
         .ok_or("Fikk ikke laget avspillingskopi av fila")?;
     let mut body = serde_json::json!({ "action": "proxy-lenk-fullfor", "id": asset_id, "proxyStorrelse": n });
     // Mangler kortet plakat, kan den lokale proxyen levere den også.
     if !har_plakat {
-        let vi = video_info(&app, &sti).await;
+        let vi = video_info(app, sti).await;
         if let Some(po) = vi.poster { body["posterBase64"] = serde_json::json!(po); }
         if let Some(sp) = vi.sprite { body["spriteBase64"] = serde_json::json!(sp); body["spriteFrames"] = serde_json::json!(vi.frames); }
     }
     let r = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&body).send().await.map_err(|e| format!("{e}"))?;
     let d: serde_json::Value = r.json().await.unwrap_or(serde_json::json!({}));
     if !d["ok"].as_bool().unwrap_or(false) { return Err(d["error"].as_str().unwrap_or("Serveren avviste proxyen").to_string()); }
-    Ok(serde_json::json!({ "ok": true }))
+    Ok(())
+}
+
+/// MAPPE MOT MAPPE (0.2.0, Vegard: «kan man lenke en mappe mot en mappe også
+/// finner appen match basert på navn?»): hent skap-mappas videoer uten
+/// avspillingskopi, indekser den lokale mappa på filstamme (rekursivt), og
+/// lenk hvert treff. 69 høyreklikk blir ett.
+#[tauri::command]
+async fn lenk_proxy_mappe(app: AppHandle, portal: String, nokkel: String, mappe_id: String, lokal: String) -> Result<serde_json::Value, String> {
+    let portal = portal.trim_end_matches('/').to_string();
+    let k = klient(&nokkel)?;
+    let bare = reqwest::Client::builder().build().map_err(|e| format!("{e}"))?;
+    let r = k.post(format!("{}/api/rawskap/opplasting", portal))
+        .json(&serde_json::json!({ "action": "proxy-lenk-kandidater", "mappeId": mappe_id })).send().await.map_err(|e| format!("{e}"))?;
+    let d: serde_json::Value = r.json().await.map_err(|e| format!("{e}"))?;
+    let kandidater: Vec<(String, String)> = d["kandidater"].as_array().map(|a| a.iter()
+        .filter_map(|x| Some((x["id"].as_str()?.to_string(), x["filnavn"].as_str()?.to_string()))).collect()).unwrap_or_default();
+    if kandidater.is_empty() { return Ok(serde_json::json!({ "lenket": 0, "mangler": 0, "feilet": [] })); }
+    // Stamme → lokal sti. Grunneste treff vinner (Resolve legger dypt; en
+    // proxy rett i mappa er mer presis enn en fem nivåer ned).
+    let mut kart: std::collections::HashMap<String, (usize, String)> = std::collections::HashMap::new();
+    for f in les_mappe(lokal.clone()).await? {
+        if !er_video(&f.sti) && !f.sti.to_ascii_lowercase().ends_with(".lrf") { continue; }
+        let p = std::path::Path::new(&f.sti);
+        let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else { continue };
+        let dybde = f.relativ.matches('/').count() + f.relativ.matches('\\').count();
+        let e = kart.entry(stem.to_ascii_lowercase()).or_insert((usize::MAX, String::new()));
+        if dybde < e.0 { *e = (dybde, f.sti.clone()); }
+    }
+    let total = kandidater.len();
+    let (mut lenket, mut mangler) = (0usize, 0usize);
+    let mut feilet: Vec<serde_json::Value> = Vec::new();
+    for (i, (id, navn)) in kandidater.iter().enumerate() {
+        let stem = std::path::Path::new(navn).file_stem().and_then(|s| s.to_str()).unwrap_or(navn).to_ascii_lowercase();
+        let _ = app.emit("lenk-framdrift", serde_json::json!({ "navn": navn, "n": i + 1, "total": total }));
+        match kart.get(&stem) {
+            None => { mangler += 1; }
+            Some((_, sti)) => match lenk_en(&app, &k, &bare, &portal, id, sti).await {
+                Ok(()) => { lenket += 1; }
+                Err(e) => { feilet.push(serde_json::json!({ "navn": navn, "feil": e })); }
+            },
+        }
+    }
+    Ok(serde_json::json!({ "lenket": lenket, "mangler": mangler, "feilet": feilet }))
 }
 
 /// DEL FRA APPEN (0.2.0): opprett en LEVENDE mappe-deling — samme API som
@@ -1417,7 +1473,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
-        .invoke_handler(tauri::generate_handler![avbryt_fil, lenk_proxy, del_mappe, last_inn, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![avbryt_fil, lenk_proxy, lenk_proxy_mappe, del_mappe, last_inn, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
