@@ -431,6 +431,47 @@ async fn proxy_holder(app: &AppHandle, ut: &str, kilde: f64) -> bool {
     parse_varighet(&err) >= kilde * 0.9
 }
 
+/// Finn en proxy brukeren allerede har laget for dette klippet (0.2.0, Vegard:
+/// «jeg lager ofte proxies lokalt, så det er ofte unødvendig å lage disse på
+/// nytt»). Ren filsystem-titting — billig nok til å kalles i hver løype.
+/// Mønstrene, i prioritert rekkefølge:
+///   1. DJI:      <mappe>/<stamme>.LRF (Mavic legger lavoppløst opptak ved
+///                siden av masteren — det ER en proxy)
+///   2. Enkelt:   <mappe>/Proxy|Proxies/<stamme>[_Proxy].mov|mp4 (Premiere &
+///                håndlagde oppsett)
+///   3. Resolve:  <forfar>/Proxy/ProxyMedia/<kildens sti fra volumroten>/
+///                <stamme>.mov|mp4 — Resolve SPEILER hele kildestien under
+///                ProxyMedia (verifisert mot Vegards Rakettnatt-oppsett 31/8)
+fn finn_lokal_proxy(sti: &str) -> Option<String> {
+    let p = std::path::Path::new(sti);
+    let (dir, stem) = (p.parent()?, p.file_stem()?.to_str()?.to_string());
+    let fins = |c: std::path::PathBuf| if c.is_file() { Some(c.to_string_lossy().to_string()) } else { None };
+    for e in ["LRF", "lrf"] {
+        if let Some(t) = fins(dir.join(format!("{stem}.{e}"))) { return Some(t); }
+    }
+    let navn: Vec<String> = ["mov", "mp4"].iter()
+        .flat_map(|e| [format!("{stem}.{e}"), format!("{stem}_Proxy.{e}")]).collect();
+    for m in ["Proxy", "Proxies"] {
+        for n in &navn { if let Some(t) = fins(dir.join(m).join(n)) { return Some(t); } }
+    }
+    // Kildemappa uten stasjonsprefiks/rot — det Resolve speiler under ProxyMedia.
+    let rel: std::path::PathBuf = dir.components()
+        .filter(|c| matches!(c, std::path::Component::Normal(_))).collect();
+    let mut a = Some(dir);
+    for _ in 0..8 {
+        let Some(base) = a else { break };
+        let pm = base.join("Proxy").join("ProxyMedia");
+        if pm.is_dir() {
+            for n in &navn {
+                if let Some(t) = fins(pm.join(&rel).join(n)) { return Some(t); }
+                if let Some(t) = fins(pm.join(n)) { return Some(t); }
+            }
+        }
+        a = base.parent();
+    }
+    None
+}
+
 async fn video_info(app: &AppHandle, sti: &str) -> VideoInfo {
     let mut v = VideoInfo { bredde: 0, hoyde: 0, varighet: 0.0, poster: None, sprite: None, frames: 0 };
     let (_, err) = match ffmpeg_ut(app, &["-hide_banner".into(), "-i".into(), sti.into()]).await { Ok(x) => x, Err(_) => return v };
@@ -474,16 +515,30 @@ async fn video_info(app: &AppHandle, sti: &str) -> VideoInfo {
 /// Returnerer størrelsen på proxyen, eller None om noe røk — en manglende
 /// proxy skal ALDRI velte selve opplastingen. Da faller vi tilbake til den
 /// gamle løypa (Stream/Rawcode), som fortsatt virker.
-async fn lag_og_last_opp_proxy(app: &AppHandle, bare: &reqwest::Client, sti: &str, put_url: &str, id: &str, total: u64) -> Option<u64> {
-    let _ = app.emit("framdrift", Framdrift { id: id.to_string(), hentet: total, total, status: "proxy".into(), feil: None });
+async fn lag_og_last_opp_proxy(app: &AppHandle, bare: &reqwest::Client, sti: &str, put_url: &str, id: &str, total: u64, kilde_varighet: f64, prov_remux: bool) -> Option<u64> {
+    // `sti` ≠ `id` betyr at kilden er en LOKAL proxy (Resolve/LRF) — si det i
+    // fasen, så brukeren ser hvorfor dette steget plutselig går på sekunder.
+    let lokal = sti != id;
+    let _ = app.emit("framdrift", Framdrift { id: id.to_string(), hentet: total, total, status: if lokal { "proxyLokal".into() } else { "proxy".into() }, feil: None });
     let ut = std::env::temp_dir().join(format!("rawskap-proxy-{}-{}.mp4", std::process::id(), rand_suffiks()));
     let ut_s = ut.to_string_lossy().to_string();
-    // Fasiten vi måler resultatet mot.
-    let kilde_varighet = {
-        let (_, e) = ffmpeg_ut(app, &["-hide_banner".into(), "-i".into(), sti.into()]).await.unwrap_or_default();
-        if probe_ubrukelig(&e) { return None; }
-        parse_varighet(&e)
-    };
+    // REMUX-VEIEN: kilden er alt H.264 ≤1920 — bare bytt container og legg
+    // faststart-flagget. Feiler den (rart lydspor, korrupt fil), faller vi
+    // videre til full enkoding under.
+    if prov_remux {
+        let args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-y", "-i", sti,
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", &ut_s]
+            .iter().map(|s| s.to_string()).collect();
+        if ffmpeg_ut(app, &args).await.is_ok() && proxy_holder(app, &ut_s, kilde_varighet).await {
+            let bytes = tokio::fs::read(&ut).await.ok().filter(|b| b.len() > 10_000)?;
+            let _ = tokio::fs::remove_file(&ut).await;
+            let n = bytes.len() as u64;
+            let svar = bare.put(put_url).header(reqwest::header::CONTENT_TYPE, "video/mp4").header(reqwest::header::CONTENT_LENGTH, n).body(bytes).send().await;
+            if let Ok(r) = svar { if r.status().is_success() { return Some(n); } }
+            return None;
+        }
+        let _ = tokio::fs::remove_file(&ut).await;
+    }
 
     // MASKINVARE-ENKODING FØRST. Å skalere 8K ned til 1080p på CPU tar minutter
     // per klipp; NVENC/VideoToolbox gjør det i sanntid eller raskere. libx264
@@ -817,7 +872,29 @@ async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Clien
 /// Bare video, og bare når serveren faktisk tilbød en proxy-URL.
 async fn lag_proxy_hvis_video(app: &AppHandle, bare: &reqwest::Client, sti: &str, navn: &str, put_url: &str, total: u64) -> Option<u64> {
     if put_url.is_empty() || !er_video(navn) { return None; }
-    lag_og_last_opp_proxy(app, bare, sti, put_url, sti, total).await
+    // Original-proben er billig (bare container-hodene) og gir fasiten:
+    // varighet + om strømmen i det hele tatt kan leses.
+    let (_, e) = ffmpeg_ut(app, &["-hide_banner".into(), "-i".into(), sti.into()]).await.unwrap_or_default();
+    let orig_lesbar = !probe_ubrukelig(&e);
+    let orig_var = parse_varighet(&e);
+    // LOKAL PROXY FØRST: har brukeren alt laget en (Resolve/LRF/Premiere), er
+    // det bortkastet å enkode masteren på nytt — og for ProRes RAW er det
+    // ENESTE vei til en avspillingskopi i det hele tatt. Kandidaten må dekke
+    // klippet (≥90 % av varigheten), ellers later vi som den ikke finnes.
+    if let Some(lp) = finn_lokal_proxy(sti) {
+        let (_, pe) = ffmpeg_ut(app, &["-hide_banner".into(), "-i".into(), lp.clone()]).await.unwrap_or_default();
+        let p_var = parse_varighet(&pe);
+        if !probe_ubrukelig(&pe) && (orig_var <= 0.0 || p_var >= orig_var * 0.9) {
+            // Alt H.264 i spillbar størrelse? Da holder en remux — sekunder,
+            // ikke minutter, og ingen generasjon tapt kvalitet.
+            let (w, _) = parse_dim(&pe);
+            let remux = pe.contains("Video: h264") && w > 0 && w <= 1920;
+            let fasit = if orig_var > 0.0 { orig_var } else { p_var };
+            if let Some(n) = lag_og_last_opp_proxy(app, bare, &lp, put_url, sti, total, fasit, remux).await { return Some(n); }
+        }
+    }
+    if !orig_lesbar { return None; }
+    lag_og_last_opp_proxy(app, bare, sti, put_url, sti, total, orig_var, false).await
 }
 
 /// Fullfør-steget (server: thumb/EXIF/dedup for bilder; video: poster/sprite fra ffmpeg her).
@@ -841,7 +918,20 @@ async fn fullfor_opplasting(app: &AppHandle, k: &reqwest::Client, portal: &str, 
     let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: bytes, total: bytes, status: "fullfor".into(), feil: None });
     if er_video(navn) {
         let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: bytes, total: bytes, status: "thumbs".into(), feil: None });
-        let vi = video_info(app, &fil.sti).await;
+        let mut vi = video_info(app, &fil.sti).await;
+        // Ingen plakat (ProRes RAW: strømmen kan ikke leses)? Den lokale
+        // proxyen kan. Bildene hentes derfra; MÅL og VARIGHET beholdes fra
+        // originalens container — kortet skal si 8192x4320, ikke 1024x540.
+        if vi.poster.is_none() {
+            if let Some(lp) = finn_lokal_proxy(&fil.sti) {
+                let vp = video_info(app, &lp).await;
+                vi.poster = vp.poster;
+                vi.sprite = vp.sprite;
+                vi.frames = vp.frames;
+                if vi.varighet <= 0.0 { vi.varighet = vp.varighet; }
+                if vi.bredde == 0 { vi.bredde = vp.bredde; vi.hoyde = vp.hoyde; }
+            }
+        }
         if vi.bredde > 0 { body["bredde"] = serde_json::json!(vi.bredde); body["hoyde"] = serde_json::json!(vi.hoyde); }
         if vi.varighet > 0.0 { body["varighet"] = serde_json::json!(vi.varighet); }
         if let Some(p) = vi.poster { body["posterBase64"] = serde_json::json!(p); }
@@ -859,6 +949,23 @@ async fn fullfor_opplasting(app: &AppHandle, k: &reqwest::Client, portal: &str, 
 #[tauri::command]
 async fn last_opp(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String, nokkel: String, filer: Vec<OppFil>, mappe_id: String, parallell: usize) -> Result<serde_json::Value, String> {
     tilstand.avbryt.store(false, Ordering::Relaxed);
+    // DJI legger X.LRF (lavoppløst opptak) ved siden av X.MOV — det ER en
+    // proxy. Ligger BEGGE i jobben, blir LRF-en avspillingskopi for MOV-en
+    // (finn_lokal_proxy finner den i proxy-steget) i stedet for å bli et eget,
+    // uspillbart kort i skapet. En jobb med bare LRF-er røres ikke: da har
+    // brukeren valgt dem med vilje.
+    let video_stammer: std::collections::HashSet<String> = filer.iter()
+        .filter(|f| er_video(&f.sti) && !f.sti.to_ascii_lowercase().ends_with(".lrf"))
+        .filter_map(|f| std::path::Path::new(&f.sti).with_extension("").to_str().map(|s| s.to_ascii_lowercase()))
+        .collect();
+    let (som_proxy, filer): (Vec<OppFil>, Vec<OppFil>) = filer.into_iter().partition(|f| {
+        f.sti.to_ascii_lowercase().ends_with(".lrf")
+            && std::path::Path::new(&f.sti).with_extension("").to_str()
+                .map(|s| video_stammer.contains(&s.to_ascii_lowercase())).unwrap_or(false)
+    });
+    for f in &som_proxy {
+        let _ = app.emit("framdrift", Framdrift { id: f.sti.clone(), hentet: f.bytes, total: f.bytes, status: "somProxy".into(), feil: None });
+    }
     let portal = portal.trim_end_matches('/').to_string();
     let k = klient(&nokkel)?;
     let bare = reqwest::Client::builder().build().map_err(|e| format!("{e}"))?;
