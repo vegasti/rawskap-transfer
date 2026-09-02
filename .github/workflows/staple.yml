@@ -35,6 +35,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Rawskap-Transfer-macOS-arm64-stapled
+          name: Rawskap-Transfer-macOS-${{ inputs.arch }}-stapled
           path: ut/Rawskap-Transfer.dmg
           if-no-files-found: error
