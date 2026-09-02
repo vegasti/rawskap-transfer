@@ -9,6 +9,10 @@ on:
       run_id:
         description: 'Run-ID til bygget med macOS-artifacten'
         required: true
+      arch:
+        description: 'Arkitektur: arm64 (Apple Silicon) eller x86_64 (Intel)'
+        required: false
+        default: 'arm64'
 
 jobs:
   staple:
@@ -18,7 +22,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh run download ${{ inputs.run_id }} -R ${{ github.repository }} -n Rawskap-Transfer-macOS-arm64 -D dmg
+          gh run download ${{ inputs.run_id }} -R ${{ github.repository }} -n Rawskap-Transfer-macOS-${{ inputs.arch }} -D dmg
           find dmg -name '*.dmg'
 
       - name: Staple + verifiser

@@ -85,6 +85,58 @@ jobs:
             src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
           if-no-files-found: error
 
+      # INTEL-MAC (2/9, Vegards bestilling «egen Intel-bygg»): samme runner
+      # kryssbygger x86_64 — egen sidecar (statisk amd64-ffmpeg fra samme kilde),
+      # eget target-katalogtre (target/x86_64-apple-darwin/…), samme Developer
+      # ID-signering og notarisering. Egen artifact; auto-oppdateringen er per
+      # arkitektur (darwin-x86_64 → macIntel i portalens manifest).
+      - name: Rust-target x86_64
+        run: rustup target add x86_64-apple-darwin
+
+      - name: ffmpeg-sidecar (statisk x86_64)
+        run: |
+          curl -sfL -o ffmpeg-x64.zip https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffmpeg.zip
+          rm -rf ffdl-x64 && unzip -oq ffmpeg-x64.zip -d ffdl-x64
+          BIN=$(find ffdl-x64 -type f -name ffmpeg | head -1)
+          test -n "$BIN"
+          mv "$BIN" src-tauri/binaries/ffmpeg-x86_64-apple-darwin
+          chmod +x src-tauri/binaries/ffmpeg-x86_64-apple-darwin
+          file src-tauri/binaries/ffmpeg-x86_64-apple-darwin | grep -q x86_64
+
+      - name: Bygg + signer (Intel)
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build -- --target x86_64-apple-darwin --bundles app,dmg
+
+      - name: Send til notarisering (Intel, no-wait)
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          DMG=$(find src-tauri/target/x86_64-apple-darwin/release/bundle/dmg -name '*.dmg' | head -1)
+          test -n "$DMG"
+          xcrun notarytool submit "$DMG" --key "$RUNNER_TEMP/AuthKey.p8" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER" --no-wait
+
+      - name: Verifiser signatur (Intel)
+        run: |
+          APP=$(find src-tauri/target/x86_64-apple-darwin/release/bundle/macos -maxdepth 1 -name '*.app' | head -1)
+          codesign -dv --verbose=2 "$APP" 2>&1 | grep -E 'Authority|TeamIdentifier|flags'
+          lipo -archs "$APP/Contents/MacOS/"* 2>/dev/null | head -3
+          spctl -a -vv "$APP" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Rawskap-Transfer-macOS-x86_64
+          path: |
+            src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
+          if-no-files-found: error
+
   # WINDOWS (24/8): samme app, win64. ffmpeg-sidecaren er BtbN sitt LGPL-bygg —
   # samme lisenslinje som det bevisste LGPL-valget for den lokale exe-en.
   # Usignert enn så lenge (Authenticode/Azure Trusted Signing er egen beslutning);
