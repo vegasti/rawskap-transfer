@@ -264,6 +264,12 @@
       </span>
     </div>
     <div class="faner"><button class="på" id="ofane-aktiv" data-t="fAktive">Aktive</button><button id="ofane-hist" data-t="histTittel">Historikk</button></div>
+    <!-- Lim inn deling også HER (0.2.6, Vegard): mottakere lander i Overføringer uten skap. -->
+    <div class="rad" id="overf-deling" style="padding:10px 18px 2px; gap:8px; align-items:center">
+      <input type="text" id="deling-lenke2" style="flex:1; min-width:200px" placeholder="https://rawskap.no/d/…" data-t-ph="apneDelingPh" />
+      <button class="btn liten" id="apne-deling2" data-t="apneDelingKnapp">Åpne delingen</button>
+      <span id="deling-feil2" class="hjelp"></span>
+    </div>
     <div class="liste" id="overf-panel"></div>
     <div class="liste skjult" id="hist-panel"></div>
   </div>
@@ -1364,16 +1370,18 @@
     const m = s.match(/rawskap:\/\/deling\/([A-Za-z0-9_-]{6,40})/) || s.match(/\/(?:d|rawvare\/samling)\/([A-Za-z0-9_-]{6,40})/) || s.match(/^([A-Za-z0-9_-]{6,40})$/);
     return m ? `rawskap://deling/${m[1]}` : '';
   }
-  async function apneDelingFraFelt() {
-    const felt = $('deling-lenke'); const feil = $('deling-feil');
+  async function apneDelingFraFelt(feltId = 'deling-lenke', feilId = 'deling-feil') {
+    const felt = $(feltId); const feil = $(feilId);
     const url = tolkDelingLenke(felt && felt.value);
     if (!url) { if (feil) feil.textContent = t.apneDelingUgyldig || 'Ugyldig lenke'; return; }
     if (feil) feil.textContent = '';
     // Lenka kan peke på en annen portal (dev/preview): bruk vertsnavnet fra lenka.
     try { const u = new URL(String(felt.value).trim()); if (/^https?:$/.test(u.protocol) && $('portal')) $('portal').value = u.origin; } catch { /* kode/rawskap:// → standard-portalen */ }
     await taImotLenke(url);
+    if (felt) felt.value = '';
   }
-  { const k = $('apne-deling'); if (k) k.onclick = apneDelingFraFelt; const f = $('deling-lenke'); if (f) f.addEventListener('keydown', e => { if (e.key === 'Enter') apneDelingFraFelt(); }); }
+  { const k = $('apne-deling'); if (k) k.onclick = () => apneDelingFraFelt(); const f = $('deling-lenke'); if (f) f.addEventListener('keydown', e => { if (e.key === 'Enter') apneDelingFraFelt(); }); }
+  { const k = $('apne-deling2'); if (k) k.onclick = () => apneDelingFraFelt('deling-lenke2', 'deling-feil2'); const f = $('deling-lenke2'); if (f) f.addEventListener('keydown', e => { if (e.key === 'Enter') apneDelingFraFelt('deling-lenke2', 'deling-feil2'); }); }
   function vis_vindu_js() { try { const w = window.__TAURI__.window.getCurrentWindow(); w.show(); w.unminimize(); w.setFocus(); } catch { /* */ } }
   try {
     const dl = window.__TAURI__.deepLink;
