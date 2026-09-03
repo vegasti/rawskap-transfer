@@ -397,7 +397,7 @@
   // som B — «0 kB» sa ingenting.
   const fmt = b => { const s = b >= 1e9 ? `${(b / 1e9).toFixed(2)} GB` : b >= 1e6 ? `${(b / 1e6).toFixed(1)} MB` : b >= 1000 ? `${Math.round(b / 1e3)} kB` : `${Math.max(0, Math.round(b || 0))} B`; return erNo ? s.replace('.', ',') : s; };
   const antFiler = n => `${n} ${n === 1 ? t.fil : t.filer}`;
-  const kontoTekst = () => `${data.mapper.length} ${data.mapper.length === 1 ? t.mappe : t.mapper} · ${antFiler(data.filer.length)} · ${fmt(data.totalBytes)}`;
+  const kontoTekst = () => !data ? '' : `${data.mapper.length} ${data.mapper.length === 1 ? t.mappe : t.mapper} · ${antFiler(data.filer.length)} · ${fmt(data.totalBytes)}`;
   const store = await load('transfer.json', { autoSave: true });
   let portal = '', nokkel = '', data = null, valgtMappe = '', maal = '', visning = 'mappe';
   let sortFelt = 'navn', sortStig = true; // fil-lista: klikk på kolonnehodet
@@ -639,6 +639,9 @@
   const underMapper = rot => { const forelder = new Map(data.mapper.map(m => [m.id, m.forelderId || ''])); const s = new Set(); for (const m of data.mapper) { let k = m.id, v = 0, treff = !rot; while (k && v++ < 30 && !treff) { if (k === rot) treff = true; k = forelder.get(k) || ''; } if (treff) s.add(m.id); } return s; };
   const lukket = new Set((await store.get('lukket')) || []);
   function tegnTre() {
+    // Deling uten innlogging (0.2.5, Vegard: «Cannot read properties of null (reading 'filer')»):
+    // overføringsvisningen tegner skap-treet, men uten innlogging finnes det ikke noe skap.
+    if (!data) { const tre = $('tre'); if (tre) tre.innerHTML = ''; return; }
     const tre = $('tre'); tre.innerHTML = '';
     const barnAv = id => data.mapper.filter(m => (m.forelderId || '') === id).sort((a, b) => a.navn.localeCompare(b.navn, 'nb'));
     const antall = new Map(); for (const f of data.filer) antall.set(f.mappeId || '', (antall.get(f.mappeId || '') || 0) + 1);
