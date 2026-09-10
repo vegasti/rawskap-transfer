@@ -906,9 +906,17 @@ async fn fullfor_opplasting(app: &AppHandle, k: &reqwest::Client, portal: &str, 
     // Ingen proxy Å sende? Si HVORFOR når grunnen er at formatet ikke kan
     // leses (ProRes RAW): serveren dropper da Stream-forsøket i stedet for å
     // la Cloudflare hente titalls GB som uansett feiler. Proben er billig.
+    //
+    // ⚠ OG SI DET TIL BRUKEREN. Flagget gikk før BARE til serveren: fila ble
+    // grønn og ferdig i lista, og at den aldri får en avspillingskopi oppdaget
+    // man først dagen etter, i skapet, ved å holde musa over et lite merke —
+    // altså i en annen app, lenge etter at maskina var lukket. Beskjeden hører
+    // hjemme HER, hvor fila ligger på disken og «Lenk lokal proxy …» står i
+    // høyreklikk-menyen rett ved siden av (Vegard 11/9).
+    let mut uten_proxy = false;
     if proxy.is_none() && er_video(navn) {
         let (_, e) = ffmpeg_ut(app, &["-hide_banner".into(), "-i".into(), fil.sti.clone()]).await.unwrap_or_default();
-        if probe_ubrukelig(&e) { body["proxyUlesbar"] = serde_json::json!(true); }
+        if probe_ubrukelig(&e) { body["proxyUlesbar"] = serde_json::json!(true); uten_proxy = true; }
     }
     if let Some(n) = proxy {
         // ⚠ MÅ være bit for bit lik serverens `proxyNokkel` — den avviser en
@@ -948,7 +956,11 @@ async fn fullfor_opplasting(app: &AppHandle, k: &reqwest::Client, portal: &str, 
     let st = r.status().as_u16();
     let d: serde_json::Value = r.json().await.unwrap_or(serde_json::json!({}));
     if !(200..300).contains(&st) { return Err(format!("fullfør: {}", d["error"].as_str().unwrap_or("feilet"))); }
-    let status = if d["allerede"].as_bool().unwrap_or(false) { "hoppet" } else { "ferdig" };
+    // «utenProxy» er en FERDIG tilstand — fila ER lastet opp, og originalen er
+    // trygt i skapet. Den sier bare at det mangler noe å spille av, og hva man
+    // gjør med det. Derfor teller den som fullført alle steder i UI-et.
+    let status = if d["allerede"].as_bool().unwrap_or(false) { "hoppet" }
+        else if uten_proxy { "utenProxy" } else { "ferdig" };
     let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: bytes, total: bytes, status: status.into(), feil: None });
     Ok(())
 }
