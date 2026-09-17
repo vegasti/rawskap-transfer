@@ -103,7 +103,15 @@ window.__TAURI__ = (() => {
       else { feil.push(navn); console.log('  ✗', navn, '\n     fikk:      ' + a + '\n     forventet: ' + b); }
     };
 
-    console.log('1. Rendrer grensesnittet');
+    console.log('0. Oppstartsskjerm og tooltips');
+    // ⚠ Blir oppstartsskjermen staaende, skjuler den HELE appen — den maa vekk naar appen er klar.
+    sjekk('oppstartsskjermen er fjernet etter oppstart', await ev(`!document.getElementById('oppstart')`), true);
+    // data-t-tt gjelder BARE naar spraaket er engelsk (se `if (!erNo)`), saa title= maa staa paa
+    // norsk i HTML-en. Et tomt title ga ingen tooltip i det hele tatt — det var feilen 18/9.
+    sjekk('«Følg mappa» har tooltip', await ev(`(document.getElementById('folg-mappe').title || '').length > 40`), true);
+    sjekk('«Last ned nye» har tooltip', await ev(`(document.getElementById('last-ned-nye').title || '').length > 40`), true);
+
+    console.log('\n1. Rendrer grensesnittet');
     // Rota har ingen filer direkte — naviger inn i mappa foerst (klikk paa mappe-raden).
     sjekk('rota viser mappa', await ev(`document.querySelectorAll('#filer .filrad.mappe').length`), 1);
     await ev(`document.querySelector('#filer .filrad.mappe').click()`);

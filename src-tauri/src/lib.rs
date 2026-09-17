@@ -732,12 +732,33 @@ pub struct SjekkFil { pub id: String, #[serde(default)] pub sti: String, pub fil
 #[tauri::command]
 async fn mangler_lokalt(rot: String, filer: Vec<SjekkFil>) -> Result<Vec<String>, String> {
     let r = PathBuf::from(&rot);
+    // ⚠ FINNES IKKE MAPPA, ER ALT NYTT. Det vanligste tilfellet: mappa er aldri lastet ned. Uten
+    // denne linja spurte vi disken én gang PER FIL om noe vi allerede visste svaret på.
+    if tokio::fs::metadata(&r).await.is_err() {
+        return Ok(filer.into_iter().map(|f| f.id).collect());
+    }
+    // ⚠ ÉN KATALOGLESING PER MAPPE, ikke én stat per fil (18/9). Denne kjører hver gang en mappe
+    // åpnes, og den første varianten gjorde ett systemkall per fil: med et par tusen filer på en
+    // nettverksdisk ble det sekunder med venting før lista kom opp. Katalogen leses nå én gang og
+    // navnene slås opp i minnet. På Windows bærer read_dir-oppføringene metadataene sine fra
+    // katalogskanningen, så `metadata()` her koster ikke et nytt kall.
+    let mut kataloger: std::collections::HashMap<String, std::collections::HashSet<String>> = std::collections::HashMap::new();
     let mut ut = Vec::new();
     for f in filer {
-        let mut p = r.clone();
-        for d in f.sti.split('/').filter(|s| !s.is_empty()) { p.push(trygt_navn(d)); }
-        p.push(trygt_navn(&f.filnavn));
-        let finnes = tokio::fs::metadata(&p).await.map(|m| m.len() > 0).unwrap_or(false);
+        if !kataloger.contains_key(&f.sti) {
+            let mut p = r.clone();
+            for d in f.sti.split('/').filter(|s| !s.is_empty()) { p.push(trygt_navn(d)); }
+            let mut sett = std::collections::HashSet::new();
+            if let Ok(mut kat) = tokio::fs::read_dir(&p).await {
+                while let Ok(Some(e)) = kat.next_entry().await {
+                    // Tomme filer teller som fraværende — samme unntak som i last_ned_en.
+                    let stor_nok = e.metadata().await.map(|m| m.len() > 0).unwrap_or(false);
+                    if stor_nok { sett.insert(e.file_name().to_string_lossy().to_string()); }
+                }
+            }
+            kataloger.insert(f.sti.clone(), sett);
+        }
+        let finnes = kataloger.get(&f.sti).map(|s| s.contains(&trygt_navn(&f.filnavn))).unwrap_or(false);
         if !finnes { ut.push(f.id); }
     }
     Ok(ut)
