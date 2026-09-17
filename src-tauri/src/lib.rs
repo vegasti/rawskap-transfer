@@ -188,8 +188,8 @@ async fn last_ned_en(
     let mappe = if trygg_sti.as_os_str().is_empty() { rot.to_path_buf() } else { rot.join(trygg_sti) };
     tokio::fs::create_dir_all(&mappe).await.map_err(|e| format!("{e}"))?;
     let mut maal = mappe.join(trygt_navn(&fil.filnavn));
-    // Når fila finnes: 'hopp' (lik størrelse = ferdig, ellers overskriv — standard),
-    // 'begge' (nytt navn «navn (2).ext»), 'overskriv' (alltid på nytt).
+    // Når fila finnes: 'hopp' (LA DEN VÆRE — standard), 'begge' (nytt navn «navn (2).ext»),
+    // 'overskriv' (alltid på nytt).
     if tokio::fs::metadata(&maal).await.is_ok() {
         match konflikt {
             "begge" => { let (stamme, ext) = match trygt_navn(&fil.filnavn).rsplit_once('.') { Some((a, b)) => (a.to_string(), format!(".{b}")), None => (trygt_navn(&fil.filnavn), String::new()) }; let mut n = 2; loop { let k = mappe.join(format!("{stamme} ({n}){ext}")); if tokio::fs::metadata(&k).await.is_err() { maal = k; break; } n += 1; } }
@@ -199,14 +199,34 @@ async fn last_ned_en(
     }
     let part = mappe.join(format!("{}.part", trygt_navn(&fil.filnavn)));
 
+    // ⚠ FINNES FILA MED SITT ENDELIGE NAVN, RØRER VI DEN IKKE (17/9).
+    //
+    // Før dette hoppet vi bare over når størrelsen var LIK, og lastet ned oppå når den avvek. Det
+    // ødela arbeid: en redigerer som jobber i nedlastingsmappa endrer størrelsen på fila. Lightroom
+    // skriver metadata rett inn i DNG-filer, og .xmp-sidecars til ARW endrer størrelse ved hver
+    // justering — så neste «last ned mappa» la originalen tilbake oppå hennes versjon, uten å spørre.
+    //
+    // At vi trygt kan la den være, følger av hvor gjenopptaks-tilstanden bor: en avbrutt nedlasting
+    // ligger som «navn.ext.part», ALDRI under sitt endelige navn. En fil med endelig navn og avvikende
+    // størrelse er derfor aldri en halvferdig nedlasting — den er noens endrede fil.
+    //
+    // Størrelsen brukes fortsatt, men bare til å SI hva som skjedde: lik = allerede overført,
+    // ulik = endret lokalt. «Overskriv» og «Behold begge» er uendret for den som vil ha dem.
+    // Unntak: en TOM fil er ingens arbeid. Uten dette ville en 0-byte rest (fra et annet program,
+    // eller en disk som gikk full) blitt stående som «endret lokalt» for alltid.
     if let Ok(m) = tokio::fs::metadata(&maal).await {
-        if fil.bytes > 0 && m.len() == fil.bytes {
-            // Død .part ved siden av komplett fil (kø 25/8): en avbrutt runde
-            // etterlot resten — fila ER her, så resume-dataene er verdiløse.
-            let _ = tokio::fs::remove_file(&part).await;
-            let _ = app.emit("framdrift", Framdrift { id: fil.id.clone(), hentet: fil.bytes, total: fil.bytes, status: "hoppet".into(), feil: None });
-            return Ok(());
-        }
+        if m.len() == 0 { let _ = tokio::fs::remove_file(&maal).await; }
+    }
+    if let Ok(m) = tokio::fs::metadata(&maal).await {
+        // Død .part ved siden av komplett fil (kø 25/8): en avbrutt runde etterlot resten — fila ER
+        // her, så resume-dataene er verdiløse.
+        let _ = tokio::fs::remove_file(&part).await;
+        let lik = fil.bytes > 0 && m.len() == fil.bytes;
+        let _ = app.emit("framdrift", Framdrift {
+            id: fil.id.clone(), hentet: fil.bytes, total: fil.bytes,
+            status: if lik { "hoppet".into() } else { "endretLokalt".to_string() }, feil: None,
+        });
+        return Ok(());
     }
     let allerede = tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(0);
     let hentet = Arc::new(AtomicU64::new(allerede));
