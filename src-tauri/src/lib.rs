@@ -673,6 +673,34 @@ async fn fil_xxh64_meld(sti: &Path, meld: Option<(&AppHandle, &str, u64)>) -> Re
     Ok(format!("{:016x}", h.digest()))
 }
 
+/// Hvilke av disse filene finnes IKKE i nedlastingsmappa?
+///
+/// Svaret er hele grunnlaget for «N nye» og «Last ned nye» (17/9). Vegard: en redigerer som skal ha
+/// siste bunke maatte laste ned HELE mappa paa nytt. Nedlastingen hoppet riktignok over det som alt
+/// laa der, men ingenting FORTALTE henne at det fantes noe nytt, og jobben viste 500 filer for aa
+/// hente 12.
+///
+/// ⚠ «Finnes» betyr her nøyaktig det samme som i last_ned_en: ligger fila der med sitt endelige
+/// navn, er den ikke ny — uansett stoerrelse. En fil hun har redigert (DNG som Lightroom har skrevet
+/// i) skal ikke dukke opp som «ny» og friste til aa hente originalen tilbake. Tomme filer teller som
+/// fravaerende, samme unntak som der.
+#[derive(Deserialize)]
+pub struct SjekkFil { pub id: String, #[serde(default)] pub sti: String, pub filnavn: String }
+
+#[tauri::command]
+async fn mangler_lokalt(rot: String, filer: Vec<SjekkFil>) -> Result<Vec<String>, String> {
+    let r = PathBuf::from(&rot);
+    let mut ut = Vec::new();
+    for f in filer {
+        let mut p = r.clone();
+        for d in f.sti.split('/').filter(|s| !s.is_empty()) { p.push(trygt_navn(d)); }
+        p.push(trygt_navn(&f.filnavn));
+        let finnes = tokio::fs::metadata(&p).await.map(|m| m.len() > 0).unwrap_or(false);
+        if !finnes { ut.push(f.id); }
+    }
+    Ok(ut)
+}
+
 /// Starter en fersk multipart og gir resume-tilstanden tilbake.
 /// Egen funksjon fordi den kalles to steder: ved ny opplasting, og når en
 /// gjenopptatt opplasting viser seg å være død på serveren (30/8).
@@ -1613,7 +1641,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
-        .invoke_handler(tauri::generate_handler![avbryt_fil, les_lokal, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, last_inn, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
+        .invoke_handler(tauri::generate_handler![avbryt_fil, les_lokal,
+            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, last_inn, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
