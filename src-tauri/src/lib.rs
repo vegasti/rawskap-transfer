@@ -677,8 +677,11 @@ async fn fil_xxh64_meld(sti: &Path, meld: Option<(&AppHandle, &str, u64)>) -> Re
 /// Egen funksjon fordi den kalles to steder: ved ny opplasting, og når en
 /// gjenopptatt opplasting viser seg å være død på serveren (30/8).
 async fn multipart_start(k: &reqwest::Client, portal: &str, navn: &str, mime: &str, bytes: u64, sist: u64, mappe_id: &str) -> Result<Resume, String> {
-    // Delstørrelsen settes én gang, her, og følger opplastingen til den er ferdig.
-    let resp = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "multipart-start", "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) })).send().await.map_err(|e| format!("{e}"))?;
+    // Delstørrelsen settes én gang, her, og følger opplastingen til den er ferdig — både i vår egen
+    // resume-fil OG hos serveren (`delBytes` → opplastinger_pending.DelBytes). Serveren har alltid
+    // tatt imot feltet; vi sendte det bare aldri. Uten det kan ikke nettleseren gjenoppta en
+    // opplasting Transfer har begynt på, fordi den ikke vet hvor delegrensene går.
+    let resp = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "multipart-start", "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id), "delBytes": DEL_BYTES })).send().await.map_err(|e| format!("{e}"))?;
     let st = resp.status().as_u16();
     let d: serde_json::Value = resp.json().await.map_err(|e| format!("{e}"))?;
     if st == 401 || st == 403 { return Err("Ikke tilgang — logg inn på nytt".into()); }
