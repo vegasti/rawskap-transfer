@@ -615,11 +615,23 @@ fn rand_suffiks() -> String {
 // xxh64 av sti|størrelse|mtime) — uploadId, originalKey, ferdige deler m/
 // ETag. Starter man på nytt (nettbrudd, lukket app) fortsettes fra siste
 // ferdige del. Rådes til å ha lifecycle-regel i R2 for forlatte multiparts.
-const DEL_BYTES: u64 = 64 * 1024 * 1024;
-const DEL_GRENSE: u64 = 96 * 1024 * 1024;
+/// ⚠ GAMMEL delstørrelse. Resume-filer uten `del_bytes` ble skrevet med denne, og MÅ leses med den.
+const DEL_BYTES_GAMMEL: u64 = 64 * 1024 * 1024;
+/// Delstørrelse for NYE opplastinger. Senket fra 64 MB (17/9): et tapt delforsøk kostet opptil
+/// 64 MB å gjenta — omtrent hele en råfil. 16 MB koster sekunder. (R2/S3 krever minst 5 MB.)
+const DEL_BYTES: u64 = 16 * 1024 * 1024;
+/// Over denne går opplastingen i deler med gjenopptak. Senket fra 96 MB (17/9): en fotograf som
+/// skyter 60-70 MB råfiler lå UNDER hele grensa, så nettopp filene som tar lang nok tid til å ryke
+/// var de eneste uten gjenopptak. 24 MB gir deling på alt som varer mer enn et øyeblikk.
+const DEL_GRENSE: u64 = 24 * 1024 * 1024;
 
 #[derive(Clone, Serialize, Deserialize, Default)]
-struct Resume { upload_id: String, original_key: String, mappe_id: String, bytes: u64, deler: Vec<(u32, String)>, #[serde(default)] proxy_put: String }
+struct Resume { upload_id: String, original_key: String, mappe_id: String, bytes: u64, deler: Vec<(u32, String)>, #[serde(default)] proxy_put: String,
+    /// ⚠ Delstørrelsen opplastingen FAKTISK ble startet med. Må følge tilstanden, ikke leses fra
+    /// konstanten: endrer vi DEL_BYTES, ville en gjenopptatt opplasting fra forrige versjon fått
+    /// delene skrevet på feil forskyvning — korrupt fil, uten feilmelding. 0 = skrevet før dette
+    /// feltet fantes, og da var den alltid 64 MB.
+    #[serde(default)] del_bytes: u64 }
 
 fn resume_dir() -> PathBuf {
     let d = dirs::data_local_dir().unwrap_or(std::env::temp_dir()).join("RawskapTransfer").join("opplasting");
@@ -665,6 +677,7 @@ async fn fil_xxh64_meld(sti: &Path, meld: Option<(&AppHandle, &str, u64)>) -> Re
 /// Egen funksjon fordi den kalles to steder: ved ny opplasting, og når en
 /// gjenopptatt opplasting viser seg å være død på serveren (30/8).
 async fn multipart_start(k: &reqwest::Client, portal: &str, navn: &str, mime: &str, bytes: u64, sist: u64, mappe_id: &str) -> Result<Resume, String> {
+    // Delstørrelsen settes én gang, her, og følger opplastingen til den er ferdig.
     let resp = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "multipart-start", "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) })).send().await.map_err(|e| format!("{e}"))?;
     let st = resp.status().as_u16();
     let d: serde_json::Value = resp.json().await.map_err(|e| format!("{e}"))?;
@@ -672,7 +685,7 @@ async fn multipart_start(k: &reqwest::Client, portal: &str, navn: &str, mime: &s
     let (uid, key) = match (d["uploadId"].as_str(), d["originalKey"].as_str()) { (Some(u), Some(kk)) => (u.to_string(), kk.to_string()), _ => return Err(d["error"].as_str().unwrap_or("multipart-start feilet").to_string()) };
     // Serveren tilbyr en presignert URL for avspillingsproxyen (kun video).
     // Den lagres i resume-fila så en gjenopptatt opplasting ikke mister den.
-    Ok(Resume { upload_id: uid, original_key: key, mappe_id: mappe_id.to_string(), bytes, deler: vec![], proxy_put: d["proxyPutUrl"].as_str().unwrap_or("").to_string() })
+    Ok(Resume { upload_id: uid, original_key: key, mappe_id: mappe_id.to_string(), bytes, deler: vec![], proxy_put: d["proxyPutUrl"].as_str().unwrap_or("").to_string(), del_bytes: DEL_BYTES })
 }
 
 async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &Stopp, struper: Arc<Struper>, navn: &str, mime: &str, bytes: u64, sist: u64) -> Result<(String, u64, String), String> {
@@ -686,7 +699,11 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
         r = multipart_start(k, portal, navn, mime, bytes, sist, mappe_id).await?;
         resume_skriv(&rsti, &r);
     }
-    let antall = ((bytes + DEL_BYTES - 1) / DEL_BYTES) as u32;
+    // ⚠ REGN MED OPPLASTINGENS EGEN DELSTØRRELSE, ikke konstanten. En resume-fil fra en tidligere
+    // versjon ble skrevet med 64 MB; leser vi den med dagens tall, havner delene på feil
+    // forskyvning og fila blir korrupt uten at noe sier fra. 0 = fil fra før feltet fantes.
+    let del = if r.del_bytes > 0 { r.del_bytes } else { DEL_BYTES_GAMMEL };
+    let antall = ((bytes + del - 1) / del) as u32;
     let mut f = tokio::fs::File::open(&fil.sti).await.map_err(|e| format!("{e}"))?;
     let mut hentet;
     // ⚠ DØD OPPLASTING (30/8): kjenner ikke serveren opplastingen igjen, er
@@ -697,7 +714,7 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
     let mut omstart_brukt = false;
     'omstart: loop {
     let ferdige: std::collections::HashSet<u32> = r.deler.iter().map(|(n, _)| *n).collect();
-    hentet = ((ferdige.len() as u64) * DEL_BYTES).min(bytes);
+    hentet = ((ferdige.len() as u64) * del).min(bytes);
     let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet, total: bytes, status: "laster".into(), feil: None });
     // Presigner deler i bolker på 20 (URL-ene lever 1 t).
     let mangler: Vec<u32> = (1..=antall).filter(|n| !ferdige.contains(n)).collect();
@@ -719,8 +736,8 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
         for nr in bolk {
             if avbryt.av() { return Err("Avbrutt".into()); }
             let url = urler.get(nr).ok_or("mangler URL for del")?;
-            let start = (*nr as u64 - 1) * DEL_BYTES;
-            let len = (bytes - start).min(DEL_BYTES);
+            let start = (*nr as u64 - 1) * del;
+            let len = (bytes - start).min(del);
             f.seek(std::io::SeekFrom::Start(start)).await.map_err(|e| format!("{e}"))?;
             let mut buf = vec![0u8; len as usize];
             f.read_exact(&mut buf).await.map_err(|e| format!("{e}"))?;

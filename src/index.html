@@ -1068,11 +1068,27 @@
     try {
       if (j.type === 'opp') {
         // Navnekollisjon i målmappa (Innstillinger): identiske hoppes alltid (serveren gjør det også).
-        const iMappe = data.filer.filter(f => (f.mappeId || '') === (j.mappeId || ''));
+        //
+        // ⚠ UNDERMAPPER SJEKKES NÅ OGSÅ (17/9). Før sto det «undermapper: ingen kollisjonssjekk
+        // (mappa lages ny)» og hoppet rett over dem. Det stemmer FØRSTE gang en mappe lastes opp —
+        // men laster du opp samme mappe på nytt, gikk alt i undermappene opp igjen, hver gang.
+        // Vi trenger ingen nye API-kall for å rette det: hele mappetreet og fillista ligger i
+        // klienten fra før, så undermappa kan slås opp ved navn.
+        const mappeForRelativ = (rotId, relativ) => {
+          const deler = relativ.split('/').slice(0, -1);   // alt unntatt filnavnet
+          let id = rotId || '';
+          for (const navn of deler) {
+            const m = data.mapper.find(x => (x.forelderId || '') === id && x.navn === navn);
+            if (!m) return null;   // undermappa finnes ikke i skapet ennå → ingenting å kollidere med
+            id = m.id;
+          }
+          return id;
+        };
         const erstattIds = [];
         for (const f of j.filer) {
-          if (f.relativ.includes('/')) continue; // undermapper: ingen kollisjonssjekk (mappa lages ny)
-          const treff = iMappe.filter(x => x.filnavn === f.filnavn);
+          const mid = mappeForRelativ(j.mappeId, f.relativ);
+          if (mid === null) continue;
+          const treff = data.filer.filter(x => (x.mappeId || '') === mid && x.filnavn === f.filnavn);
           if (!treff.length) continue;
           if (treff.some(x => x.bytes === f.bytes)) { f.hopp = 'lik'; continue; }
           if (P.oppKonflikt === 'hopp') f.hopp = 'navn';
