@@ -1198,6 +1198,11 @@
     tegnJobber();
     try {
       if (j.type === 'opp') {
+        // ⚠ FRISK LISTE FØRST (17/9). Kollisjonssjekken under leser klientens cache, som hentes ved
+        // innlogging og oppdatering. I en to-personers arbeidsflyt — én laster opp mens den andre
+        // redigerer — kan den være timer gammel, og da ser vi ikke det den andre nettopp la inn.
+        // Ett kall før jobben starter er billig; å laste opp duplikater er det ikke.
+        try { await oppdaterSkap(); } catch { /* uten frisk liste faller vi tilbake på cachen */ }
         // Navnekollisjon i målmappa (Innstillinger): identiske hoppes alltid (serveren gjør det også).
         //
         // ⚠ UNDERMAPPER SJEKKES NÅ OGSÅ (17/9). Før sto det «undermapper: ingen kollisjonssjekk

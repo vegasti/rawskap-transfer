@@ -15,9 +15,9 @@ jobs:
   bygg:
     runs-on: macos-latest # arm64 (M-serien)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
 
@@ -76,7 +76,7 @@ jobs:
           codesign -dv --verbose=2 "$APP" 2>&1 | grep -E 'Authority|TeamIdentifier|flags'
           spctl -a -vv "$APP" || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: Rawskap-Transfer-macOS-arm64
           path: |
@@ -128,7 +128,7 @@ jobs:
           lipo -archs "$APP/Contents/MacOS/"* 2>/dev/null | head -3
           spctl -a -vv "$APP" || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: Rawskap-Transfer-macOS-x86_64
           path: |
@@ -144,9 +144,9 @@ jobs:
   bygg-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 20
 
@@ -173,7 +173,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- --bundles nsis,msi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: Rawskap-Transfer-Windows-x64
           path: |

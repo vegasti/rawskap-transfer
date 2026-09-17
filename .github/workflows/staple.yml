@@ -33,7 +33,7 @@ jobs:
           spctl -a -t open --context context:primary-signature -vv "$DMG" || true
           mkdir ut && cp "$DMG" "ut/Rawskap-Transfer.dmg"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: Rawskap-Transfer-macOS-${{ inputs.arch }}-stapled
           path: ut/Rawskap-Transfer.dmg

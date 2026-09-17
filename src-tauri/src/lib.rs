@@ -160,8 +160,24 @@ async fn hent_liste(portal: String, nokkel: String, mappe: String) -> Result<ser
 
 fn bare_uten_redirect() -> reqwest::Client { reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap_or_default() }
 
+/// Gjør en streng trygg å bruke som ETT ledd i en sti.
+///
+/// ⚠ Det holder ikke å bytte ut skilletegnene. Et navn på nøyaktig «.» eller «..» slapp gjennom før
+/// (funnet av `trygt_navn_slipper_ikke_ut_av_mappa` 17/9, første gang testen kjørte): da ble
+/// `mappe.join("..")` til FORELDREMAPPA. Stien i seg selv er filtrert lenger oppe, så dette ga i
+/// praksis en forvirrende feil og ikke en traversering — men en funksjon som heter «trygt navn» skal
+/// ikke overlate den vurderingen til kallstedet. Navn som bare er punktum, og Windows' reserverte
+/// enhetsnavn (som aldri kan opprettes som fil), får et understrek foran.
 fn trygt_navn(s: &str) -> String {
-    s.chars().map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c }).collect()
+    let rent: String = s.chars().map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c }).collect();
+    let rent = rent.trim().to_string();
+    if rent.is_empty() || rent.chars().all(|c| c == '.') { return format!("_{rent}"); }
+    let stamme = rent.split('.').next().unwrap_or("").to_ascii_uppercase();
+    const RESERVERTE: [&str; 22] = ["CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"];
+    if RESERVERTE.contains(&stamme.as_str()) { return format!("_{rent}"); }
+    rent
 }
 
 /// Last ned én fil med Range-resume. Skriver til «<navn>.part», flytter til
@@ -251,7 +267,7 @@ async fn last_ned_en(
     if allerede > 0 {
         req = req.header(reqwest::header::RANGE, format!("bytes={}-", allerede));
     }
-    let resp = req.send().await.map_err(|e| format!("{e}"))?;
+    let resp = req.send().await.map_err(nettfeil)?;
     let status = resp.status().as_u16();
     let (append, start) = match status {
         206 => (true, allerede),
@@ -646,6 +662,32 @@ fn resume_skriv(p: &Path, r: &Resume) { if let Ok(b) = serde_json::to_vec(r) { l
 
 /// xxh64 av hele fila (1 MB-blokker). Brukes ved opplasting (lagres på raden)
 /// og ved nedlasting (verifisering mot serverens verdi).
+/// Hvor i fila del `nr` starter, og hvor lang den er.
+///
+/// ⚠ Dette er aritmetikken som ødelegger en fil hvis den er feil, og den er lett å ta feil av: en
+/// del skrevet på gal forskyvning gir en korrupt fil UTEN at noe feiler underveis. Den fikk egen
+/// funksjon 17/9 nettopp for å kunne testes — delstørrelsen ble endret samme dag, og da må man
+/// kunne bevise at delene fortsatt dekker fila nøyaktig én gang.
+fn del_omrade(nr: u32, del: u64, bytes: u64) -> (u64, u64) {
+    let start = (nr as u64 - 1) * del;
+    (start, bytes.saturating_sub(start).min(del))
+}
+
+/// Nettverksfeil UTEN URL-en.
+///
+/// ⚠ reqwest tar med hele URL-en i sin `Display`, og en presignert R2-URL ER en gyldig
+/// skrive-legitimasjon i et kvarter. Den havnet dermed rett i feilmeldinga brukeren ser, som går
+/// videre inn i skjermbilder, jobbkøen og loggfiler (Vegard 17/9: «fikk en vanvittig lang
+/// feilmelding i transfer» — med signaturen i). `without_url()` stripper den, og det som er igjen
+/// skiller fortsatt tidsavbrudd fra avvist forbindelse, som er det man faktisk trenger å vite.
+fn nettfeil(e: reqwest::Error) -> String {
+    let u = e.without_url();
+    if u.is_timeout() { return "Tidsavbrudd mot lageret — prøv igjen".into(); }
+    if u.is_connect() { return "Fikk ikke kontakt med lageret — sjekk nettforbindelsen".into(); }
+    if u.is_body() || u.is_request() { return "Mistet forbindelsen underveis — prøv igjen".into(); }
+    format!("Nettverksfeil: {u}")
+}
+
 async fn fil_xxh64(sti: &Path) -> Result<String, String> { fil_xxh64_meld(sti, None).await }
 
 /// xxh64 over hele fila. `meld` gir framdrift underveis (app, id, total) —
@@ -719,7 +761,10 @@ async fn multipart_start(k: &reqwest::Client, portal: &str, navn: &str, mime: &s
     Ok(Resume { upload_id: uid, original_key: key, mappe_id: mappe_id.to_string(), bytes, deler: vec![], proxy_put: d["proxyPutUrl"].as_str().unwrap_or("").to_string(), del_bytes: DEL_BYTES })
 }
 
-async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &Stopp, struper: Arc<Struper>, navn: &str, mime: &str, bytes: u64, sist: u64) -> Result<(String, u64, String), String> {
+async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &Stopp, struper: Arc<Struper>, navn: &str, mime: &str, bytes: u64, sist: u64) -> Result<(String, u64, String, Option<String>), String> {
+    // xxh64 regnes mens delene likevel leses (17/9) — se fil_strom for hvorfor.
+    let hasher = std::sync::Mutex::new(xxhash_rust::xxh64::Xxh64::new(0));
+    let mut hel = true;
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let rsti = resume_sti(&fil.sti, bytes, sist);
     let mut r = resume_les(&rsti).filter(|r| r.bytes == bytes && r.mappe_id == mappe_id).unwrap_or_default();
@@ -745,6 +790,9 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
     let mut omstart_brukt = false;
     'omstart: loop {
     let ferdige: std::collections::HashSet<u32> = r.deler.iter().map(|(n, _)| *n).collect();
+    // Finnes det alt ferdige deler, har vi IKKE lest hele fila i denne kjøringen — da er en
+    // helfils-hash umulig, og vi lar være å påstå en.
+    if !ferdige.is_empty() { hel = false; }
     hentet = ((ferdige.len() as u64) * del).min(bytes);
     let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet, total: bytes, status: "laster".into(), feil: None });
     // Presigner deler i bolker på 20 (URL-ene lever 1 t).
@@ -767,11 +815,13 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
         for nr in bolk {
             if avbryt.av() { return Err("Avbrutt".into()); }
             let url = urler.get(nr).ok_or("mangler URL for del")?;
-            let start = (*nr as u64 - 1) * del;
-            let len = (bytes - start).min(del);
+            let (start, len) = del_omrade(*nr, del, bytes);
             f.seek(std::io::SeekFrom::Start(start)).await.map_err(|e| format!("{e}"))?;
             let mut buf = vec![0u8; len as usize];
             f.read_exact(&mut buf).await.map_err(|e| format!("{e}"))?;
+            // Hash HER, ikke i forsøks-løkka under: delen leses én gang, men kan sendes flere.
+            // Delene går i stigende rekkefølge (1..n), så dette gir samme sum som ett gjennomløp.
+            if hel { if let Ok(mut h) = hasher.lock() { h.update(&buf); } }
             // Én del = ett forsøk × 3 (ekte resume: ferdige deler røres aldri).
             //
             // ⚠ FRAMDRIFT UNDERVEIS (28/8, Vegard: «går fra 3.8 MB/s til 22 MB/s
@@ -837,7 +887,13 @@ async fn last_opp_multipart(app: &AppHandle, k: &reqwest::Client, bare: &reqwest
     let d: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
     if !d["ok"].as_bool().unwrap_or(false) { return Err(d["error"].as_str().unwrap_or("Kunne ikke sette sammen fila").to_string()); }
     let _ = std::fs::remove_file(&rsti);
-    Ok((r.original_key.clone(), hentet, r.proxy_put.clone()))
+    // Hashen er bare gyldig når VI har lest hver eneste del i denne kjøringen. Ble opplastingen
+    // gjenopptatt, hoppet vi over ferdige deler og har dermed ikke sett hele fila — da sendes ingen
+    // sjekksum, og nedlasting faller tilbake på størrelsessjekk (som den allerede håndterer).
+    // Å gjette her ville vært verre enn å la være: en FEIL sjekksum gjør hver senere nedlasting
+    // til en falsk verifiseringsfeil.
+    let xxh = if hel { hasher.lock().ok().map(|h| format!("{:016x}", h.digest())) } else { None };
+    Ok((r.original_key.clone(), hentet, r.proxy_put.clone(), xxh))
 }
 
 // ── OPPLASTING (22/8): samme løype som nettleseren — presign → PUT rett til
@@ -873,18 +929,29 @@ async fn sikre_mappe(k: &reqwest::Client, portal: &str, rot: &str, relativ_dir: 
 }
 
 /// Fil → byte-strøm m/ teller (PUT-framdrift).
-fn fil_strom(f: tokio::fs::File, struper: Arc<Struper>, avbryt: Stopp, mut tell: impl FnMut(u64) + Send + 'static) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
+/// ⚠ `hash` er valgfri, og den er hele poenget med at opplasting ikke lenger tar dobbelt så lang
+/// tid. Før regnet vi xxh64 i et EGET fullt gjennomløp av fila FØR første byte ble sendt — altså
+/// leste vi 65 MB to ganger for å laste opp 65 MB, og telleren sto på null hele den første runden.
+/// Nå hashes bitene mens de likevel går ut på nett, så sjekksummen er gratis og overføringen
+/// begynner med en gang. Den er samtidig BEDRE: den er regnet over nøyaktig de bytene som faktisk
+/// ble sendt, ikke over fila slik den lå da vi begynte.
+fn fil_strom(f: tokio::fs::File, struper: Arc<Struper>, avbryt: Stopp, hash: Option<Arc<std::sync::Mutex<xxhash_rust::xxh64::Xxh64>>>, mut tell: impl FnMut(u64) + Send + 'static) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
     use tokio::io::AsyncReadExt;
-    futures_util::stream::unfold((f, struper, avbryt), |(mut f, struper, avbryt)| async move {
+    futures_util::stream::unfold((f, struper, avbryt, hash), |(mut f, struper, avbryt, hash)| async move {
         // Avbryt MIDT i en PUT (22/8-bug: en gjenglemt opplasting levde videre etter
         // reload og rapporterte til samme rad som den nye) — kutt strømmen, så
         // feiler PUT-en og opprydding (action avbryt) kjører.
-        if avbryt.av() { return Some((Err(std::io::Error::other("Avbrutt")), (f, struper, avbryt))); }
+        if avbryt.av() { return Some((Err(std::io::Error::other("Avbrutt")), (f, struper, avbryt, hash))); }
         let mut buf = vec![0u8; 1 << 20];
         match f.read(&mut buf).await {
             Ok(0) => None,
-            Ok(n) => { buf.truncate(n); struper.tell(n as u64).await; Some((Ok(bytes::Bytes::from(buf)), (f, struper, avbryt))) }
-            Err(e) => Some((Err(e), (f, struper, avbryt))),
+            Ok(n) => {
+                buf.truncate(n);
+                if let Some(h) = &hash { if let Ok(mut h) = h.lock() { h.update(&buf); } }
+                struper.tell(n as u64).await;
+                Some((Ok(bytes::Bytes::from(buf)), (f, struper, avbryt, hash)))
+            }
+            Err(e) => Some((Err(e), (f, struper, avbryt, hash))),
         }
     }).inspect(move |r| { if let Ok(b) = r { tell(b.len() as u64); } })
 }
@@ -895,12 +962,11 @@ async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Clien
     let meta = tokio::fs::metadata(&fil.sti).await.map_err(|e| format!("{e}"))?;
     let bytes = meta.len();
     let sist = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
-    // xxh64 mens vi likevel leser — lagres på raden, verifiseres ved nedlasting.
-    let _ = app.emit("framdrift", Framdrift { id: fil.sti.clone(), hentet: 0, total: bytes, status: "hash".into(), feil: None });
-    let xxh = fil_xxh64_meld(std::path::Path::new(&fil.sti), Some((app, &fil.sti, bytes))).await.ok();
+    // xxh64 regnes MENS bitene sendes (17/9) — ikke i et eget gjennomløp først. Se fil_strom.
+    let hasher = Arc::new(std::sync::Mutex::new(xxhash_rust::xxh64::Xxh64::new(0)));
     // Store filer: multipart m/ resume. Små: én PUT som før.
     if bytes > DEL_GRENSE {
-        let (key, _, proxy_put) = last_opp_multipart(app, k, bare, portal, fil, mappe_id, avbryt, struper.clone(), &navn, mime, bytes, sist).await?;
+        let (key, _, proxy_put, xxh) = last_opp_multipart(app, k, bare, portal, fil, mappe_id, avbryt, struper.clone(), &navn, mime, bytes, sist).await?;
         let proxy = lag_proxy_hvis_video(app, bare, &fil.sti, &navn, &proxy_put, bytes).await;
         return fullfor_opplasting(app, k, portal, fil, &key, &navn, mime, bytes, sist, mappe_id, xxh, proxy).await;
     }
@@ -918,7 +984,7 @@ async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Clien
     let id = fil.sti.clone(); let app2 = app.clone();
     let sendt = Arc::new(AtomicU64::new(0)); let sendt2 = sendt.clone();
     let mut sist_meldt = std::time::Instant::now();
-    let strom = fil_strom(f, struper, avbryt.clone(), move |n| {
+    let strom = fil_strom(f, struper, avbryt.clone(), Some(hasher.clone()), move |n| {
         let t = sendt2.fetch_add(n, Ordering::Relaxed) + n;
         if sist_meldt.elapsed().as_millis() > 150 || t == bytes { sist_meldt = std::time::Instant::now(); let _ = app2.emit("framdrift", Framdrift { id: id.clone(), hentet: t, total: bytes, status: "laster".into(), feil: None }); }
     });
@@ -927,12 +993,15 @@ async fn last_opp_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Clien
         let _ = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "avbryt", "originalKeys": [key] })).send().await;
         return Err("Avbrutt".into());
     }
-    let resp = resp.map_err(|e| format!("{e}"))?;
+    let resp = resp.map_err(nettfeil)?;
     if !resp.status().is_success() { return Err(format!("Lageret svarte {}", resp.status())); }
     if false {
         let _ = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&serde_json::json!({ "action": "avbryt", "originalKeys": [key] })).send().await;
         return Err("Avbrutt".into());
     }
+    // Hashen er ferdig i samme øyeblikk siste byte er sendt — den kostet ingenting ekstra, og den
+    // beskriver nøyaktig det som gikk over lina.
+    let xxh = hasher.lock().ok().map(|h| format!("{:016x}", h.digest()));
     let proxy = lag_proxy_hvis_video(app, bare, &fil.sti, &navn, &proxy_put, bytes).await;
     fullfor_opplasting(app, k, portal, fil, &key, &navn, mime, bytes, sist, mappe_id, xxh, proxy).await
 }
@@ -1645,4 +1714,63 @@ pub fn run() {
             mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, last_inn, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TESTER (17/9). Repoet hadde ingen. Fire feil ble funnet på én ettermiddag, og tre av dem satt i
+// logikk som så åpenbart riktig ut ved lesing — så dekningen starter på det som faktisk ØDELEGGER
+// DATA hvis det er galt, ikke på det som er lett å teste.
+//   cargo test
+#[cfg(test)]
+mod tester {
+    use super::*;
+
+    /// Delene skal dekke fila NØYAKTIG én gang: ingen hull, ingen overlapp, siste del kortere.
+    /// Kjøres for flere delstørrelser fordi tallet ble endret 17/9 (64 → 16 MB) mens gamle,
+    /// gjenopptatte opplastinger fortsatt leses med SIN egen — begge må stemme.
+    #[test]
+    fn deler_dekker_fila_uten_hull_eller_overlapp() {
+        for del in [5u64 << 20, 8 << 20, 16 << 20, 64 << 20] {
+            for bytes in [1u64, 100, del - 1, del, del + 1, 3 * del, 3 * del + 7, 65_000_000] {
+                let antall = ((bytes + del - 1) / del) as u32;
+                let mut dekket = 0u64;
+                let mut forrige_slutt = 0u64;
+                for nr in 1..=antall {
+                    let (start, len) = del_omrade(nr, del, bytes);
+                    assert_eq!(start, forrige_slutt, "hull eller overlapp ved del {nr} (del={del}, bytes={bytes})");
+                    assert!(len > 0, "tom del {nr} (del={del}, bytes={bytes})");
+                    assert!(len <= del, "del {nr} er større enn delstørrelsen");
+                    forrige_slutt = start + len;
+                    dekket += len;
+                }
+                assert_eq!(dekket, bytes, "delene dekker ikke hele fila (del={del}, bytes={bytes})");
+            }
+        }
+    }
+
+    /// Hashen regnes nå bitvis mens bytene sendes, i stedet for i et eget gjennomløp først.
+    /// Den MÅ gi samme sum — ellers blir hver senere nedlasting en falsk verifiseringsfeil.
+    #[test]
+    fn bitvis_hash_er_lik_hash_av_hele() {
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let mut hel = xxhash_rust::xxh64::Xxh64::new(0);
+        hel.update(&data);
+        for biter in [1usize, 7, 1024, 65_536, 1 << 20] {
+            let mut delvis = xxhash_rust::xxh64::Xxh64::new(0);
+            for b in data.chunks(biter) { delvis.update(b); }
+            assert_eq!(delvis.digest(), hel.digest(), "bitstørrelse {biter} ga en annen sum");
+        }
+    }
+
+    /// Et filnavn fra et kort (eller fra skapet) skal aldri kunne peke ut av målmappa.
+    #[test]
+    fn trygt_navn_slipper_ikke_ut_av_mappa() {
+        for stygt in ["../hemmelig.arw", "..", "/etc/passwd", "....//x"] {
+            let rent = trygt_navn(stygt);
+            assert!(!rent.contains('/'), "{stygt} ga {rent}");
+            assert!(!rent.contains('\\'), "{stygt} ga {rent}");
+            assert_ne!(rent, "..", "{stygt} ga {rent}");
+            assert_ne!(rent, ".", "{stygt} ga {rent}");
+        }
+    }
 }
