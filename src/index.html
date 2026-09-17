@@ -596,7 +596,7 @@
       openShell(p + (/rawskap\.no/.test(p) ? '/app' : '/rawskap/app') + '?kode=' + d.kode);
       for (let i = 0; i < 300; i++) {
         await new Promise(r => setTimeout(r, 2000));
-        const s = await invoke('kobling_poll', { portal: p, kode: d.kode });
+        const s = await invoke('kobling_poll', { portal: p, kode: d.kode, hemmelighet: d.hemmelighet || '' });
         if (s.ok && s.nokkel) { $('kobling-status').textContent = t.koblet; await kobleMed(p, s.nokkel); return; }
         if (s.utlopt) throw new Error(t.utlop);
       }

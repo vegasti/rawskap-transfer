@@ -395,10 +395,23 @@ async fn kobling_start(portal: String, maskin: String) -> Result<serde_json::Val
 }
 
 /// Device-kobling: poll til nøkkelen er godkjent i nettleseren.
+///
+/// ⚠ `hemmelighet` (18/9) er den lange strengen `kobling_start` fikk tilbake.
+/// De seks tegnene i koden er til å SE PÅ — de leses høyt av skjermen — mens
+/// det er hemmeligheten som beviser at det er VI som spør. Uten den var koden
+/// alene nok til å hente ut en 180-dagers sesjon fra et uinnlogget endepunkt.
+/// Tom streng = eldre portal som ennå ikke sender den; da polles som før.
 #[tauri::command]
-async fn kobling_poll(portal: String, kode: String) -> Result<serde_json::Value, String> {
+async fn kobling_poll(portal: String, kode: String, hemmelighet: String) -> Result<serde_json::Value, String> {
     let k = reqwest::Client::new();
-    let r = k.get(format!("{}/api/rawskap/transfer/kobling?kode={}", portal.trim_end_matches('/'), kode)).send().await.map_err(|e| format!("{e}"))?;
+    let mut url = format!("{}/api/rawskap/transfer/kobling?kode={}", portal.trim_end_matches('/'), kode);
+    // Hemmeligheten er ren hex fra serveren — ingen prosentkoding trengs. Vi
+    // filtrerer likevel, så et uventet svar aldri kan sette sammen en annen URL.
+    let rent: String = hemmelighet.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if !rent.is_empty() {
+        url.push_str(&format!("&h={rent}"));
+    }
+    let r = k.get(url).send().await.map_err(|e| format!("{e}"))?;
     if !r.status().is_success() { return Err(format!("Portalen svarte {}", r.status())); }
     r.json::<serde_json::Value>().await.map_err(|e| format!("{e}"))
 }
