@@ -1307,13 +1307,29 @@
       if (!v) return;
       maal = v; await store.set('maal', v); visMaal();
     }
-    if (type === 'ned' && P.bekreftNed !== false) {
+    if (type === 'ned') {
       // Samme regel som startJobbNaa bruker — brukeren skal se nøyaktig hvor
       // filene havner, ikke bare rotmappa.
       const under = (erMappe && (mappeId || filer.some(f => f.url))) ? navn.replace(/[\\/:*?"<>|]+/g, '_') : '';
-      const svar = await bekreftNed(navn, filer, maal, under);
-      if (!svar) return;
-      if (svar.ikkeSpor) { P.bekreftNed = false; $('p-bekreft-ned').checked = false; lagreP(); }
+      // ⚠ ÉN FIL KLIKKET INNE I APPEN får ikke modal (19/9) — da ville hvert
+      // eneste «⤓ Hent» krevd et ekstra klikk, og brukeren har jo nettopp pekt
+      // på fila selv. Modalen er for jobber som kommer UTENFRA (deep-link fra
+      // nettsida) og for mapper/utvalg, der «hvor mye?» er et reelt spørsmål.
+      // MEN plass-sjekken gjelder alltid: er det ikke plass, vises modalen
+      // uansett — det var en full disk som gjorde at den finnes.
+      const enkeltIApp = filer.length === 1 && !erMappe && !filer[0].url;
+      let vis = P.bekreftNed !== false && !enkeltIApp;
+      if (!vis) {
+        try {
+          const ledig = await invoke('ledig_plass', { sti: under ? `${maal}/${under}` : maal });
+          if (ledig < filer.reduce((s, f) => s + (f.bytes || 0), 0)) vis = true;
+        } catch { /* ukjent plass: ikke stopp en jobb på gjetning */ }
+      }
+      if (vis) {
+        const svar = await bekreftNed(navn, filer, maal, under);
+        if (!svar) return;
+        if (svar.ikkeSpor) { P.bekreftNed = false; $('p-bekreft-ned').checked = false; lagreP(); }
+      }
     }
     startJobbNaa(navn, filer, mappeId, erMappe, type);
   }
