@@ -258,6 +258,14 @@ async fn last_ned_en(
             .map(|s| s.to_string())
             .ok_or("302 uten Location")?,
         403 => return Err("Blokkert (samtykke trukket/utløpt)".into()),
+        // ⚠ EN DELINGSFIL SOM FÅR 401 ER IKKE EN UGYLDIG APP-NØKKEL (19/9). Før fikk
+        // alle 401 samme melding, «Nøkkelen er ugyldig — lag en ny», også når fila
+        // tilhørte en passordbeskyttet deling der adgangsnøkkelen hadde gått ut —
+        // og der finnes det ingen nøkkel å «lage». DELING_LAAST er et fast signal
+        // frontenden kjenner igjen: den pauser jobben og ber om passordet i stedet
+        // for å la hver eneste fil feile. (Delingsfiler har alltid `url`; filer fra
+        // eget skap har den tom og går via app-nøkkelen.)
+        401 if !fil.url.is_empty() => return Err("DELING_LAAST".into()),
         401 => return Err("Nøkkelen er ugyldig — lag en ny".into()),
         s if (200..300).contains(&s) => url.clone(), // ikke R2 (Drive) → strøm fra portalen
         s => return Err(format!("Portalen svarte {s}")),
@@ -1472,8 +1480,33 @@ async fn hent_deling(portal: String, token: String, nokkel: Option<String>) -> R
     let r = k.get(format!("{}/api/bildebank/samling/transfer-liste?token={}{}", portal.trim_end_matches('/'), token, hale)).send().await.map_err(|e| format!("{e}"))?;
     let st = r.status().as_u16();
     let d: serde_json::Value = r.json().await.map_err(|e| format!("{e}"))?;
+    // 401 = låst deling uten gyldig nøkkel. Serveren sier HVA slags lås det er,
+    // så frontenden vet om den kan spørre om passord (passord) eller må sende
+    // brukeren til nettleseren (inviterte — der finnes bare e-postlenka).
+    if st == 401 { return Err(format!("DELING_LAAST:{}", d["tilgang"].as_str().unwrap_or("passord"))); }
     if !(200..300).contains(&st) { return Err(d["error"].as_str().unwrap_or("Kunne ikke hente delingen").to_string()); }
     Ok(d)
+}
+
+/// Passord → kortlevd adgangsnøkkel for en passordbeskyttet deling (19/9).
+///
+/// Brukes når Transfer står uten nøkkel: en jobb som har ligget over sju dager,
+/// eller en vanlig /d/-lenke limt rett inn i appen. ⚠ Passordet sendes ÉN gang
+/// og lagres ingen steder — verken her eller i frontenden. Serveren har samme
+/// grense mot gjetting som nettleserens opplåsing.
+#[tauri::command]
+async fn deling_passord(portal: String, token: String, passord: String) -> Result<String, String> {
+    let r = reqwest::Client::new()
+        .post(format!("{}/api/bildebank/samling/transfer-nokkel", portal.trim_end_matches('/')))
+        .json(&serde_json::json!({ "token": token, "passord": passord }))
+        .send().await.map_err(|e| format!("{e}"))?;
+    let st = r.status().as_u16();
+    let d: serde_json::Value = r.json().await.unwrap_or(serde_json::Value::Null);
+    match st {
+        200..=299 => d["nokkel"].as_str().map(|s| s.to_string()).ok_or_else(|| "Serveren svarte uten nøkkel".to_string()),
+        429 => Err(d["error"].as_str().unwrap_or("For mange forsøk — vent litt").to_string()),
+        _ => Err(d["error"].as_str().unwrap_or("Feil passord").to_string()),
+    }
 }
 
 /// Semantisk søk i skapet (samme motor som nettsøket) → [{id, score}].
@@ -1777,7 +1810,7 @@ pub fn run() {
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
         .invoke_handler(tauri::generate_handler![avbryt_fil, les_lokal,
-            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, last_inn, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, ledig_plass, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
+            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, last_inn, hent_liste, hent_deling, deling_passord, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, ledig_plass, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
