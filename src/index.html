@@ -220,6 +220,19 @@
   .prompt h3 { margin:0 0 4px; font-family:Georgia,serif; font-size:17px; }
   .prompt p { margin:0 0 10px; color:var(--svak); font-size:12.5px; }
   .kode { font-family:ui-monospace,monospace; font-size:22px; letter-spacing:.15em; font-weight:700; }
+  /* Bekreft nedlasting (19/9) */
+  .ned-felt { background:var(--flate); border:1px solid var(--kant); border-radius:9px; padding:10px 12px; margin-bottom:10px; }
+  .ned-merk { font-size:11px; text-transform:uppercase; letter-spacing:.07em; color:var(--svak); margin-bottom:5px; }
+  .ned-sti { flex:1; min-width:0; font-size:12.5px; font-family:ui-monospace,monospace; word-break:break-all; line-height:1.45; }
+  .ned-plass { font-size:12.5px; color:var(--svak); margin-bottom:12px; line-height:1.5; }
+  /* Ikke nok plass: hele boksen roper, ikke bare et lite ikon — det var nettopp
+     en plassmangel som ikke ble oppdaget som gjorde at modalen finnes. */
+  .ned-plass.for-lite { color:var(--rod,#b03030); background:color-mix(in srgb, var(--rod,#b03030) 8%, transparent); border:1px solid color-mix(in srgb, var(--rod,#b03030) 35%, transparent); border-radius:8px; padding:9px 11px; }
+  /* ⚠ Nullstiller den globale label-stilen (uppercase/700/sperret, linje ~196).
+     Den er laget for skjemaoverskrifter; på en avkryssboks leste «IKKE SPØR
+     IGJEN» som en seksjonstittel og ropte høyere enn advarselen rett over. */
+  .ned-huk { display:flex; align-items:center; gap:8px; margin:0; font-size:12.5px; font-weight:400; letter-spacing:normal; text-transform:none; color:var(--svak); cursor:pointer; }
+  .ned-huk input { margin:0; }
 </style>
 </head>
 <body>
@@ -360,6 +373,7 @@
       <h3 data-t="nedMappe">Nedlastingsmappe</h3>
       <div class="innst-rad uten-strek"><div><div class="tekst" data-t="alltidTil">Last alltid ned til …</div><div class="hint" data-t="alltidTilHint">Av = appen spør hvor hver jobb skal før den starter.</div></div><input type="checkbox" id="p-fastmaal" /></div>
       <div class="sti"><span id="p-maal-sti">—</span><button class="btn liten" id="p-velg-maal" data-t="endre">Endre …</button></div>
+      <div class="innst-rad"><div><div class="tekst" data-t="bekreftNed">Bekreft før nedlasting</div><div class="hint" data-t="bekreftNedHint">Viser hva, hvor mye og hvor — og om det er plass på disken — før jobben starter.</div></div><input type="checkbox" id="p-bekreft-ned" /></div>
       <h3 data-t="konflikt">Når fila finnes fra før</h3>
       <div class="innst-rad"><div><div class="tekst" data-t="oppKonfliktTekst">Ved opplasting …</div><div class="hint" data-t="oppKonfliktHint">Gjelder filer med samme navn i samme mappe i skapet. Identiske filer (navn + størrelse) hoppes alltid over.</div></div><select id="p-oppkonflikt"><option value="begge" data-t="oKBegge">Behold begge</option><option value="hopp" data-t="oKHopp">Hopp over</option><option value="erstatt" data-t="oKErstatt">Erstatt (gammel i papirkurven)</option></select></div>
       <div class="innst-rad"><div class="tekst" data-t="konfliktTekst">Ved nedlasting …</div><select id="p-konflikt"><option value="hopp" data-t="kHopp">Hopp over (fortsett der den slapp)</option><option value="begge" data-t="kBegge">Behold begge</option><option value="overskriv" data-t="kOverskriv">Overskriv</option></select></div>
@@ -422,6 +436,28 @@
 
 <div class="kmeny" id="kmeny"></div>
 <div class="prompt-bak" id="prompt-bak"><div class="prompt"><h3 id="prompt-tittel"></h3><p id="prompt-tekst"></p><input type="text" id="prompt-felt" /><div class="rad" style="margin-top:12px;justify-content:flex-end"><button class="btn" id="prompt-avbryt" data-t="avbrytKnapp">Avbryt</button><button class="btn primær" id="prompt-ok">OK</button></div></div></div>
+
+<!-- BEKREFT NEDLASTING (19/9, Vegard: «bør man få opp en modal for å bekrefte
+     der istedenfor at den starter med én gang»). Den svarer på tre spørsmål før
+     noe skjer: hva, hvor mye, og hvor havner det. Plass-linja er grunnen til at
+     modalen finnes i det hele tatt — han startet en jobb mot en full disk. -->
+<div class="prompt-bak" id="ned-bak"><div class="prompt" style="width:min(480px,92vw)">
+  <h3 id="ned-tittel"></h3>
+  <p id="ned-meta" style="margin:0 0 14px"></p>
+  <div class="ned-felt">
+    <div class="ned-merk" data-t="nedLagresI">Lagres i</div>
+    <div class="rad" style="gap:8px; align-items:center">
+      <span class="ned-sti" id="ned-sti"></span>
+      <button class="btn liten" id="ned-endre" data-t="endre">Endre …</button>
+    </div>
+  </div>
+  <div class="ned-plass" id="ned-plass"></div>
+  <label class="ned-huk"><input type="checkbox" id="ned-ikke-spor" /><span data-t="nedIkkeSpor">Ikke spør igjen</span></label>
+  <div class="rad" style="margin-top:14px;justify-content:flex-end;gap:8px">
+    <button class="btn" id="ned-avbryt" data-t="avbrytKnapp">Avbryt</button>
+    <button class="btn primær" id="ned-start" data-t="nedStart">Last ned</button>
+  </div>
+</div></div>
 <script type="module">
   const { invoke } = window.__TAURI__.core;
   const { listen } = window.__TAURI__.event;
@@ -431,8 +467,8 @@
   const { load } = window.__TAURI__.store;
 
   const EN = { koble: 'Connect to your library', kobleTekst: 'Sign in in the browser — as you usually do (e-mail, Google or Microsoft) — and press “Connect” there. The app connects by itself. Nothing to copy.', loggInn: 'Sign in in the browser', avansert: 'Advanced: other address or key', adresse: 'Rawskap address', nokkel: 'Key (app key or API key)', kobleNokkel: 'Connect with key', til: 'Download to', lastNedMappe: '⤓ Download folder', lastetOpp: 'Uploaded', skapet: 'Library', sokPh: 'Search …', sokLokalt: 'Filtering by name — press Enter to search the whole library (Rawbot).', sokTreff: 'Search', sokIngen: 'No hits.', sokSoker: 'Searching …', sokResultat: 'hits for', mappe: 'folder', kobleForst: 'Sign in to the app first, then try the link again.', treUtenSkap: 'Not signed in — shares download fine without an account. Sign in to see your own library here.', apneDeling: 'Got a share link?', apneDelingTekst: 'Then you need no account. Paste the link from the browser (rawskap.no/d/…) or the code you were given, and the whole share is pulled straight to disk.', apneDelingPh: 'https://rawskap.no/d/…', apneDelingKnapp: 'Open share', apneDelingUgyldig: 'That does not look like a share link or code.', hasher: 'checksum …', kobler: 'connecting …', lagerProxy: 'making playable version …', lagerProxyLokal: 'using your local proxy …', somProxy: 'used as playback copy', setter: 'assembling …', fullforer: 'finishing …', klargjor: 'Preparing', behandler: 'Processing', verifisert: 'verified', gjenopptatt: 'Jobs from last time were restored — press “Try again” on the ones you want to continue.', fantesFraFor: 'already in the library', lagerPreview: 'creating preview …', kopierNavn: 'Copy file name', iUndermapper: 'in subfolders', nyMappe: '+ New folder', nyMappeTittel: 'New folder', nyMappeTekst: 'Created inside', mappenavn: 'Folder name …', avbrytKnapp: 'Cancel', avbrytFil: 'Cancel this file', pauseJobb: 'Pause', fortsettJobb: 'Resume', pausetOrd: 'paused', ventFil: 'Hold this file (let others go first)', pausetFilOrd: 'held — goes last', utenProxy: '⚠ no playback copy — right-click to link a proxy', utenProxyTt: 'The file is uploaded and the original is safely in the library, but the format (e.g. ProRes RAW) cannot play in a browser. Make a proxy locally and link it with “Link local proxy …” — or “Link proxy folder …” for the whole folder.', lenkProxy: '🔗 Link local proxy …', lenkProxyVelg: 'Pick the local proxy for this clip', lenkProxyJobber: 'linking proxy for', lenkProxyOk: 'playback copy linked ✓', lenkProxyMappe: '🔗 Link proxy folder …', lenkProxyMappeVelg: 'Pick the local folder holding the proxies', lenkProxyMappeJobber: 'matching proxies for', lenkProxyMappeOk: 'linked', lenkProxyMappeUten: 'without a local match', delMappe: '🔗 Share this folder …', delMappeJobber: 'creating share for', delMappeOk: 'share link copied ✓', histTittel: 'History', histTom: 'Clear', fAktive: 'Active', histIngen: 'Nothing here yet — finished and cancelled transfers end up here.', oppdaterTt: 'Refresh (Ctrl+R)', lokToggleTt: 'Local file browser', loggUtTt: 'Signs the app out of the account — also stops transfers', lastNedTt: 'Subfolders included', bannerNy1: 'New version', bannerNy2: 'of Rawskap Transfer is ready', bannerLast: 'Download', bannerSenere: 'later', omdKnapp: 'Rename', omdTittel: 'Rename files', omdStegMappe: 'Folder', omdTaMedMapper: 'Include subfolders (their names only — not the contents)', omdStegRegler: 'Rules', omdFinn: 'Find / replace', omdFinnPh: 'find', omdErstattPh: 'replace with', omdFjern: 'Remove chars', omdForst: 'first', omdSist: 'last', omdLeggTil: 'Add', omdForan: 'before', omdBak: 'after', omdNum: 'Numbering', omdNumAv: 'off', omdNumBak: 'after the name', omdNumForan: 'before the name', omdNumErstatt: 'replace the name', omdStart: 'start', omdSteg: 'step', omdSiffer: 'digits', omdCase: 'Letters', omdUendret: 'unchanged', omdSmaa: 'lowercase', omdStore: 'UPPERCASE', omdTittelCase: 'Title Case', omdEndelse: 'extension', omdStegForh: 'Preview', omdKjor: 'Rename', omdAngre: 'Undo last', omdAngret: 'undone ✓', omdTomt: 'nothing here', omdEndres: 'will change', omdKoll: 'collisions', omdOmdopt: 'renamed', lokTittel: 'This computer', lokVelg: 'Pick the folder to browse', lokDisker: 'Drives', innTittel: 'Card ingest', innForklar: 'Copies everything on the card (or a folder) to the archive destination and verifies every file with checksums both ways — the copy is confirmed on disk, byte for byte. The app never wipes the card; that stays your call. Optionally upload to the library afterwards: the upload reads from the archive copy, so the card is free as soon as the copy is verified.', innStegKilde: 'Card / source', innStegMaal: 'Archive destination (NAS/disk)', innStegOpp: 'Afterwards', innOppEtterpaa: 'Upload to the library once the copy is verified', innVelgKnapp: 'Pick …', innStart: 'Start ingest', innVelgMappe: 'Pick folder …', innRot: 'Library root — top level', innRotHint: 'Without a pick, the files land at the top level of the library.', innHvorSkap: 'Where in the library?', lokHint: 'Drag files into the library — or use ⤒.', innKnapp: 'Card ingest', innNavn: 'Ingest', innKilde: 'Pick the card (or folder) to ingest', innMaal: 'Where should the verified copy live? (archive/NAS)', innOgOpp: 'Copy, verify and upload to', innBare: 'Copy and verify only', innTom: 'Nothing to ingest in that folder.', her: 'here', oppTilMappe: 'Uploads go to', lastOppHit: '⤒ Upload files here', lastOppMappeHit: '⤒ Upload folder here', lastNedDenne: '⤓ Download this folder', apneMappe: 'Open', iRawskap: 'Open in Rawskap', lastOpp: '⤒ Upload', lastOppFiler: 'Pick files …', lastOppMappe: 'Pick a folder …', droppHint: 'Tip: drag files or folders straight into the list.', oppTil: 'to', opplasting: 'upload', videoUtenPoster: 'Videos get no poster image in this version — the card shows a file icon until the library processes it.', overforinger: 'Transfers', ingenOverf: 'No transfers', innstillinger: 'Preferences', fGenerelt: 'General', fNett: 'Network', fVarsler: 'Notifications', fSynk: 'Sync folders', synkTittel: 'Folders uploaded automatically', synkHint: 'Anything that lands in a local folder (e.g. your Lightroom export) is uploaded to the linked library folder — while the app is running. Uploaded files are remembered, so nothing goes twice.', synkNy: '+ Add sync folder', synkVelgLokal: 'Pick the local folder to watch', synkVelgSkap: 'Which library folder should it go to?', synkPause: 'Pause', synkFortsett: 'Resume', synkFjern: 'Remove', synkJobb: 'Sync', synkIngen: 'No sync folders yet.', nedMappe: 'Download destination', alltidTil: 'Always download to …', alltidTilHint: 'Off = the app asks where each job should go before it starts.', endre: 'Change …', konflikt: 'When a file already exists', konfliktTekst: 'On download …', kHopp: 'Skip (never touch a file that is already there)', oppKonfliktTekst: 'On upload …', oppKonfliktHint: 'Applies to files with the same name in the same library folder. Identical files (name + size) are always skipped.', oKBegge: 'Keep both', oKHopp: 'Skip', oKErstatt: 'Replace (old one to trash)', hoppetNavn: 'skipped — same name exists', endretLokalt: 'changed on your disk — left alone', kBegge: 'Keep both', kOverskriv: 'Overwrite', loggfil: 'Log file', bakgrunn: 'Background', tilKurv: 'Close to system tray', tilKurvHint: '✕ hides the window instead of quitting — sync folders and the queue keep running. Quit from the tray icon.', autostart: 'Start with Windows', autostartHint: 'Starts hidden in the system tray at sign-in.', loggTekst: 'Write a log per job', loggHint: 'Saved in the download folder: start/finish per file and a summary.', baandbredde: 'Bandwidth', samtidige: 'Concurrent transfers', parNed: 'Download', parOpp: 'Upload', parHint: 'Files in flight at once. 1 = one at a time (when one file is urgent), 3 is normal, 6 on a fast line.', flyttOverst: 'Move to top of queue', startNaa: 'Start this now (pause the active one)', strupNed: 'Throttle download', strupHint: 'Mb/s — 0 = unlimited. Handy when you want to work alongside.', strupOpp: 'Throttle upload', planTittel: 'Scheduled speed', planHint: 'During the periods below these limits apply instead; outside them the fields above apply. 0 = unlimited.', planNy: '+ Add time period', planAktiv: 'active now', planTilOrd: 'to', varslerNaar: 'Notify me on desktop when …', vFeil: 'a transfer fails', vFerdig: 'a transfer completes', varselFerdig: 'Transfer complete', varselFeil: 'Transfer failed', ryddFerdige: 'Clear finished', avbrytAlle: 'Cancel all', igjen: 'left', fOm: 'About', omSjekk: 'Check for updates', omLast: 'Download update', omNytt: "What's new", omOppdatert: 'You are on the latest version', omNy: 'New version available:', omSjekker: 'Checking …', omFeil: 'Could not check — no connection?', omSist: 'checked', oppdSjekker: 'Checking …', oppdLaster: 'Downloading', oppdStarter: 'Restarting …', oppdIngen: 'Already up to date', kolFiler: 'Files', kolStatus: 'Status', visOverf: 'Show transfers', folgMappe: '◉ Follow folder', folgMappeTt: 'Keeps pulling new files into your download folder while you work, so you never have to ask. One way only: nothing you change locally is sent back, and nothing is deleted. Stops when you close the app, or after four hours with nothing new.', lastNedNyeTt: 'Files that are in the library but not in your download folder. Files you have changed locally do not count as new — they are never fetched again.', folger: 'Following', folgStopp: 'Stop', lastNedNye: 'Download new', nyeStk: 'new', ingenNye: 'nothing new', valgtStk: 'selected', lastNedValgte: '⤓ Download selected', tomValg: 'Clear', loggUt: 'Sign out', skrivLogg: 'Write log',
-    lager: 'Creating code …', bekreft: 'Confirm the code in the browser …', koblet: 'Connected ✓', utlop: 'The code expired — try again.', forLang: 'Took too long — try again.', forrige: 'The previous connection no longer works — sign in again.', velgMaal: 'Download to', hele: 'Whole library', mapper: 'folders', filer: 'files', fil: 'file', tomMappe: 'No files in this folder.', navn: 'Name', storrelse: 'Size', hent: 'Download', venter: 'waiting', laDer: 'already transferred', ferdig: 'done', feilet: 'failed', avbrutt: 'cancelled', iKo: 'queued', avbryt: 'Cancel', apneRawskap: 'Open in Rawskap', visUtforsker: 'Show in File Explorer', visLogg: 'Show log', fjern: 'Remove from list', provIgjen: 'Try again', velgMaalForst: 'Pick a download folder first' };
-  const NO = { til: 'Last ned til', mappe: 'mappe', planTittel: 'Tidsstyrt fart', planHint: 'I tidsrommene under gjelder disse grensene i stedet; utenfor gjelder feltene over. 0 = ubegrenset.', planNy: '+ Legg til tidsrom', planAktiv: 'aktiv nå', planTilOrd: 'til', flyttOverst: 'Flytt øverst i køen', startNaa: 'Start denne nå (den aktive settes på vent)', sokPh: 'Søk …', sokLokalt: 'Filtrerer på navn — trykk Enter for å søke i hele skapet (Rawbot).', sokTreff: 'Søk', sokIngen: 'Ingen treff.', sokSoker: 'Søker …', sokResultat: 'treff for', kobleForst: 'Logg inn i appen først, og prøv lenken igjen.', treUtenSkap: 'Ikke logget inn — delinger lastes ned fint uten konto. Logg inn for å se ditt eget skap her.', apneDelingUgyldig: 'Det ser ikke ut som en delingslenke eller kode.', synkVelgLokal: 'Velg den lokale mappa som skal overvåkes', synkVelgSkap: 'Hvilken mappe i skapet skal den gå til?', synkPause: 'Pause', synkFortsett: 'Fortsett', synkFjern: 'Fjern', synkJobb: 'Synk', synkIngen: 'Ingen synk-mapper ennå.', kHopp: 'Hopp over (rører aldri en fil som alt ligger der)', hoppetNavn: 'hoppet over — samme navn finnes', endretLokalt: 'endret lokalt — rørte den ikke', hasher: 'sjekksum …', kobler: 'oppretter forbindelse …', lagerProxy: 'lager avspillbar versjon …', lagerProxyLokal: 'bruker lokal proxy …', somProxy: 'blir avspillingskopi', setter: 'setter sammen …', fullforer: 'fullfører …', klargjor: 'Klargjør', behandler: 'Behandler', verifisert: 'verifisert', gjenopptatt: 'Jobber fra forrige gang er hentet inn — trykk «Prøv igjen» på dem du vil fortsette.', fantesFraFor: 'fantes i skapet fra før', lagerPreview: 'lager forhåndsvisning …', lastetOpp: 'Lastet opp', kopierNavn: 'Kopier filnavn', varselFerdig: 'Overføring ferdig', varselFeil: 'Overføring feilet', ryddFerdige: 'Fjern ferdige', avbrytAlle: 'Avbryt alle', igjen: 'igjen', fOm: 'Om', omSjekk: 'Sjekk for oppdatering', omLast: 'Last ned ny versjon', omNytt: 'Dette er nytt', omOppdatert: 'Du er på siste versjon', omNy: 'Ny versjon tilgjengelig:', omSjekker: 'Sjekker …', omFeil: 'Fikk ikke sjekket — mangler nett?', omSist: 'sjekket', oppdSjekker: 'Sjekker …', oppdLaster: 'Laster ned', oppdStarter: 'Starter på nytt …', oppdIngen: 'Alt oppdatert', kolFiler: 'Filer', kolStatus: 'Status', visOverf: 'Vis overføringer', folgMappe: '◉ Følg mappa', folgMappeTt: 'Henter nye filer ned i nedlastingsmappa mens du jobber. Én vei — ingenting du endrer lokalt sendes tilbake, og ingenting slettes. Stopper når du lukker appen, eller etter fire stille timer.', folger: 'Følger', folgStopp: 'Stopp', lastNedNye: 'Last ned nye', nyeStk: 'nye', ingenNye: 'ingenting nytt', valgtStk: 'valgt', lastNedValgte: '⤓ Last ned valgte', tomValg: 'Tøm', avbrytKnapp: 'Avbryt', avbrytFil: 'Avbryt denne fila', pauseJobb: 'Sett på pause', fortsettJobb: 'Fortsett', pausetOrd: 'på pause', ventFil: 'Sett på vent (slipp andre fram)', pausetFilOrd: 'på vent — tas til slutt', utenProxy: '⚠ ingen avspillingskopi — høyreklikk og lenk en proxy', utenProxyTt: 'Fila er lastet opp og originalen ligger trygt i skapet, men formatet (f.eks. ProRes RAW) kan ikke spilles av i nettleseren. Lag en proxy lokalt og lenk den med «Lenk lokal proxy …» — eller «Lenk proxy-mappe …» for hele mappa.', lenkProxy: '🔗 Lenk lokal proxy …', lenkProxyVelg: 'Velg den lokale proxyen for dette klippet', lenkProxyJobber: 'lenker proxy for', lenkProxyOk: 'avspillingskopi lenket ✓', lenkProxyMappe: '🔗 Lenk proxy-mappe …', lenkProxyMappeVelg: 'Velg den lokale mappa der proxyene bor', lenkProxyMappeJobber: 'matcher proxyer for', lenkProxyMappeOk: 'lenket', lenkProxyMappeUten: 'uten lokalt treff', delMappe: '🔗 Del denne mappa …', delMappeJobber: 'lager deling for', delMappeOk: 'delingslenke kopiert ✓', histTittel: 'Historikk', histTom: 'Tøm', fAktive: 'Aktive', histIngen: 'Ingenting her ennå — fullførte og avbrutte overføringer havner her.', bannerNy1: 'Ny versjon', bannerNy2: 'av Rawskap Transfer er klar', bannerLast: 'Last ned', bannerSenere: 'senere', omdTittel: 'Omdøp filer', omdAngret: 'angret ✓', omdTomt: 'ingenting her', omdEndres: 'endres', omdKoll: 'kollisjoner', omdOmdopt: 'omdøpt', lokTittel: 'Denne maskinen', lokVelg: 'Velg mappa du vil bla i', lokDisker: 'Stasjoner', innTittel: 'Minnekort-innlasting', innForklar: 'Kopierer alt fra kortet (eller en mappe) til arkivmålet og verifiserer hver fil med sjekksum begge veier — kopien er bekreftet på disk, byte for byte. Appen tømmer aldri kortet; det er ditt valg. Velg gjerne opplasting etterpå: den leser fra arkivkopien, så kortet er fritt så snart kopien er verifisert.', innStegKilde: 'Kort / kilde', innStegMaal: 'Arkivmål (NAS/disk)', innStegOpp: 'Etterpå', innOppEtterpaa: 'Last opp til skapet når kopien er verifisert', innVelgKnapp: 'Velg …', innStart: 'Start innlasting', innRot: 'Skapets rot — øverste nivå', innHvorSkap: 'Hvor i skapet?', lokHint: 'Dra filer inn i skapet — eller bruk ⤒.', innKnapp: 'Minnekort', innNavn: 'Innlasting', innKilde: 'Velg kortet (eller mappa) som skal lastes inn', innMaal: 'Hvor skal den verifiserte kopien bo? (arkiv/NAS)', innOgOpp: 'Kopier, verifiser og last opp til', innBare: 'Bare kopier og verifiser', innTom: 'Ingenting å laste inn i den mappa.', lastOppFiler: 'Velg filer …', lastOppMappe: 'Velg en mappe …', droppHint: 'Tips: dra filer eller mapper rett inn i lista.', iUndermapper: 'i undermapper', nyMappe: '+ Ny mappe', nyMappeTittel: 'Ny mappe', nyMappeTekst: 'Lages i', mappenavn: 'Mappenavn …', her: 'hit', oppTilMappe: 'Lastes opp til', lastOppHit: '⤒ Last opp filer hit', lastOppMappeHit: '⤒ Last opp mappe hit', lastNedDenne: '⤓ Last ned denne mappa', apneMappe: 'Åpne', iRawskap: 'Åpne i Rawskap', oppTil: 'til', opplasting: 'opplasting', videoUtenPoster: 'Video får ikke plakatbilde i denne versjonen — kortet viser filikon til skapet har behandlet den.', lager: 'Lager kode …', bekreft: 'Bekreft koden i nettleseren …', koblet: 'Koblet ✓', utlop: 'Koden utløp — prøv igjen.', forLang: 'Tok for lang tid — prøv igjen.', forrige: 'Forrige kobling virker ikke lenger — logg inn på nytt.', velgMaal: 'Last ned til', hele: 'Hele skapet', mapper: 'mapper', filer: 'filer', fil: 'fil', tomMappe: 'Ingen filer i denne mappa.', navn: 'Navn', storrelse: 'Størrelse', hent: 'Last ned', venter: 'venter', laDer: 'allerede overført', ferdig: 'ferdig', feilet: 'feilet', avbrutt: 'avbrutt', iKo: 'i kø', avbryt: 'Avbryt', apneRawskap: 'Åpne i Rawskap', visUtforsker: 'Vis i Utforsker', visLogg: 'Vis logg', fjern: 'Fjern fra lista', provIgjen: 'Prøv igjen', velgMaalForst: 'Velg en nedlastingsmappe først', ingenOverf: 'Ingen overføringer' };
+    lager: 'Creating code …', bekreft: 'Confirm the code in the browser …', koblet: 'Connected ✓', utlop: 'The code expired — try again.', forLang: 'Took too long — try again.', forrige: 'The previous connection no longer works — sign in again.', velgMaal: 'Download to', hele: 'Whole library', mapper: 'folders', filer: 'files', fil: 'file', tomMappe: 'No files in this folder.', navn: 'Name', storrelse: 'Size', hent: 'Download', venter: 'waiting', laDer: 'already transferred', ferdig: 'done', feilet: 'failed', avbrutt: 'cancelled', iKo: 'queued', avbryt: 'Cancel', apneRawskap: 'Open in Rawskap', visUtforsker: 'Show in File Explorer', visLogg: 'Show log', fjern: 'Remove from list', provIgjen: 'Try again', velgMaalForst: 'Pick a download folder first', nedLagresI: 'Saved to', nedLedig: 'Free on disk:', nedForLite: 'Not enough space — short by', nedStart: 'Download', nedLikevel: 'Download anyway', nedIkkeSpor: 'Do not ask again' };
+  const NO = { til: 'Last ned til', mappe: 'mappe', planTittel: 'Tidsstyrt fart', planHint: 'I tidsrommene under gjelder disse grensene i stedet; utenfor gjelder feltene over. 0 = ubegrenset.', planNy: '+ Legg til tidsrom', planAktiv: 'aktiv nå', planTilOrd: 'til', flyttOverst: 'Flytt øverst i køen', startNaa: 'Start denne nå (den aktive settes på vent)', sokPh: 'Søk …', sokLokalt: 'Filtrerer på navn — trykk Enter for å søke i hele skapet (Rawbot).', sokTreff: 'Søk', sokIngen: 'Ingen treff.', sokSoker: 'Søker …', sokResultat: 'treff for', kobleForst: 'Logg inn i appen først, og prøv lenken igjen.', treUtenSkap: 'Ikke logget inn — delinger lastes ned fint uten konto. Logg inn for å se ditt eget skap her.', apneDelingUgyldig: 'Det ser ikke ut som en delingslenke eller kode.', synkVelgLokal: 'Velg den lokale mappa som skal overvåkes', synkVelgSkap: 'Hvilken mappe i skapet skal den gå til?', synkPause: 'Pause', synkFortsett: 'Fortsett', synkFjern: 'Fjern', synkJobb: 'Synk', synkIngen: 'Ingen synk-mapper ennå.', kHopp: 'Hopp over (rører aldri en fil som alt ligger der)', hoppetNavn: 'hoppet over — samme navn finnes', endretLokalt: 'endret lokalt — rørte den ikke', hasher: 'sjekksum …', kobler: 'oppretter forbindelse …', lagerProxy: 'lager avspillbar versjon …', lagerProxyLokal: 'bruker lokal proxy …', somProxy: 'blir avspillingskopi', setter: 'setter sammen …', fullforer: 'fullfører …', klargjor: 'Klargjør', behandler: 'Behandler', verifisert: 'verifisert', gjenopptatt: 'Jobber fra forrige gang er hentet inn — trykk «Prøv igjen» på dem du vil fortsette.', fantesFraFor: 'fantes i skapet fra før', lagerPreview: 'lager forhåndsvisning …', lastetOpp: 'Lastet opp', kopierNavn: 'Kopier filnavn', varselFerdig: 'Overføring ferdig', varselFeil: 'Overføring feilet', ryddFerdige: 'Fjern ferdige', avbrytAlle: 'Avbryt alle', igjen: 'igjen', fOm: 'Om', omSjekk: 'Sjekk for oppdatering', omLast: 'Last ned ny versjon', omNytt: 'Dette er nytt', omOppdatert: 'Du er på siste versjon', omNy: 'Ny versjon tilgjengelig:', omSjekker: 'Sjekker …', omFeil: 'Fikk ikke sjekket — mangler nett?', omSist: 'sjekket', oppdSjekker: 'Sjekker …', oppdLaster: 'Laster ned', oppdStarter: 'Starter på nytt …', oppdIngen: 'Alt oppdatert', kolFiler: 'Filer', kolStatus: 'Status', visOverf: 'Vis overføringer', folgMappe: '◉ Følg mappa', folgMappeTt: 'Henter nye filer ned i nedlastingsmappa mens du jobber. Én vei — ingenting du endrer lokalt sendes tilbake, og ingenting slettes. Stopper når du lukker appen, eller etter fire stille timer.', folger: 'Følger', folgStopp: 'Stopp', lastNedNye: 'Last ned nye', nyeStk: 'nye', ingenNye: 'ingenting nytt', valgtStk: 'valgt', lastNedValgte: '⤓ Last ned valgte', tomValg: 'Tøm', avbrytKnapp: 'Avbryt', avbrytFil: 'Avbryt denne fila', pauseJobb: 'Sett på pause', fortsettJobb: 'Fortsett', pausetOrd: 'på pause', ventFil: 'Sett på vent (slipp andre fram)', pausetFilOrd: 'på vent — tas til slutt', utenProxy: '⚠ ingen avspillingskopi — høyreklikk og lenk en proxy', utenProxyTt: 'Fila er lastet opp og originalen ligger trygt i skapet, men formatet (f.eks. ProRes RAW) kan ikke spilles av i nettleseren. Lag en proxy lokalt og lenk den med «Lenk lokal proxy …» — eller «Lenk proxy-mappe …» for hele mappa.', lenkProxy: '🔗 Lenk lokal proxy …', lenkProxyVelg: 'Velg den lokale proxyen for dette klippet', lenkProxyJobber: 'lenker proxy for', lenkProxyOk: 'avspillingskopi lenket ✓', lenkProxyMappe: '🔗 Lenk proxy-mappe …', lenkProxyMappeVelg: 'Velg den lokale mappa der proxyene bor', lenkProxyMappeJobber: 'matcher proxyer for', lenkProxyMappeOk: 'lenket', lenkProxyMappeUten: 'uten lokalt treff', delMappe: '🔗 Del denne mappa …', delMappeJobber: 'lager deling for', delMappeOk: 'delingslenke kopiert ✓', histTittel: 'Historikk', histTom: 'Tøm', fAktive: 'Aktive', histIngen: 'Ingenting her ennå — fullførte og avbrutte overføringer havner her.', bannerNy1: 'Ny versjon', bannerNy2: 'av Rawskap Transfer er klar', bannerLast: 'Last ned', bannerSenere: 'senere', omdTittel: 'Omdøp filer', omdAngret: 'angret ✓', omdTomt: 'ingenting her', omdEndres: 'endres', omdKoll: 'kollisjoner', omdOmdopt: 'omdøpt', lokTittel: 'Denne maskinen', lokVelg: 'Velg mappa du vil bla i', lokDisker: 'Stasjoner', innTittel: 'Minnekort-innlasting', innForklar: 'Kopierer alt fra kortet (eller en mappe) til arkivmålet og verifiserer hver fil med sjekksum begge veier — kopien er bekreftet på disk, byte for byte. Appen tømmer aldri kortet; det er ditt valg. Velg gjerne opplasting etterpå: den leser fra arkivkopien, så kortet er fritt så snart kopien er verifisert.', innStegKilde: 'Kort / kilde', innStegMaal: 'Arkivmål (NAS/disk)', innStegOpp: 'Etterpå', innOppEtterpaa: 'Last opp til skapet når kopien er verifisert', innVelgKnapp: 'Velg …', innStart: 'Start innlasting', innRot: 'Skapets rot — øverste nivå', innHvorSkap: 'Hvor i skapet?', lokHint: 'Dra filer inn i skapet — eller bruk ⤒.', innKnapp: 'Minnekort', innNavn: 'Innlasting', innKilde: 'Velg kortet (eller mappa) som skal lastes inn', innMaal: 'Hvor skal den verifiserte kopien bo? (arkiv/NAS)', innOgOpp: 'Kopier, verifiser og last opp til', innBare: 'Bare kopier og verifiser', innTom: 'Ingenting å laste inn i den mappa.', lastOppFiler: 'Velg filer …', lastOppMappe: 'Velg en mappe …', droppHint: 'Tips: dra filer eller mapper rett inn i lista.', iUndermapper: 'i undermapper', nyMappe: '+ Ny mappe', nyMappeTittel: 'Ny mappe', nyMappeTekst: 'Lages i', mappenavn: 'Mappenavn …', her: 'hit', oppTilMappe: 'Lastes opp til', lastOppHit: '⤒ Last opp filer hit', lastOppMappeHit: '⤒ Last opp mappe hit', lastNedDenne: '⤓ Last ned denne mappa', apneMappe: 'Åpne', iRawskap: 'Åpne i Rawskap', oppTil: 'til', opplasting: 'opplasting', videoUtenPoster: 'Video får ikke plakatbilde i denne versjonen — kortet viser filikon til skapet har behandlet den.', lager: 'Lager kode …', bekreft: 'Bekreft koden i nettleseren …', koblet: 'Koblet ✓', utlop: 'Koden utløp — prøv igjen.', forLang: 'Tok for lang tid — prøv igjen.', forrige: 'Forrige kobling virker ikke lenger — logg inn på nytt.', velgMaal: 'Last ned til', hele: 'Hele skapet', mapper: 'mapper', filer: 'filer', fil: 'fil', tomMappe: 'Ingen filer i denne mappa.', navn: 'Navn', storrelse: 'Størrelse', hent: 'Last ned', venter: 'venter', laDer: 'allerede overført', ferdig: 'ferdig', feilet: 'feilet', avbrutt: 'avbrutt', iKo: 'i kø', avbryt: 'Avbryt', apneRawskap: 'Åpne i Rawskap', visUtforsker: 'Vis i Utforsker', visLogg: 'Vis logg', fjern: 'Fjern fra lista', provIgjen: 'Prøv igjen', velgMaalForst: 'Velg en nedlastingsmappe først', ingenOverf: 'Ingen overføringer', nedLagresI: 'Lagres i', nedLedig: 'Ledig på disken:', nedForLite: 'Ikke nok plass — mangler', nedStart: 'Last ned', nedLikevel: 'Last ned likevel', nedIkkeSpor: 'Ikke spør igjen' };
   const erNo = /^(nb|nn|no|da|sv)/i.test(navigator.language || '');
   const t = erNo ? NO : EN;
   if (!erNo) { document.getElementById('html').lang = 'en'; document.querySelectorAll('[data-t]').forEach(el => { const v = EN[el.dataset.t]; if (v) el.textContent = v; }); document.querySelectorAll('[data-t-ph]').forEach(el => { const v = EN[el.dataset.tPh]; if (v) el.placeholder = v; }); document.querySelectorAll('[data-t-tt]').forEach(el => { const v = EN[el.dataset.tTt]; if (v) el.title = v; }); }
@@ -451,7 +487,7 @@
   let sortFelt = 'navn', sortStig = true; // fil-lista: klikk på kolonnehodet
   const samle = new Intl.Collator('nb', { numeric: true, sensitivity: 'base' });
   // ── Innstillinger (persistert i transfer.json) ──
-  const P = Object.assign({ fastMaal: true, konflikt: 'hopp', oppKonflikt: 'begge', logg: false, kurv: false, parNed: 3, parOpp: 3, ned: 0, opp: 0, plan: [], vFeil: true, vFerdig: true }, (await load('transfer.json', { autoSave: true }).then(s => s.get('pref'))) || {});
+  const P = Object.assign({ fastMaal: true, bekreftNed: true, konflikt: 'hopp', oppKonflikt: 'begge', logg: false, kurv: false, parNed: 3, parOpp: 3, ned: 0, opp: 0, plan: [], vFeil: true, vFerdig: true }, (await load('transfer.json', { autoSave: true }).then(s => s.get('pref'))) || {});
   // FARTSPLAN (0.2.0, Vegards «+ for å legge til en tidsperiode»): tidsrom m/
   // egne grenser. fra > til betyr over midnatt (23:00–07:00). Første treffende
   // rad vinner; utenfor alle rader gjelder basisfeltene. En JS-timer holder
@@ -527,6 +563,8 @@
   $('ofane-hist').onclick = () => visHistFane(true);
   function fyllPrefs() { tegnPlan(); $('p-fastmaal').checked = !!P.fastMaal; $('p-maal-sti').textContent = maal || '—'; $('p-konflikt').value = P.konflikt; $('p-oppkonflikt').value = P.oppKonflikt; $('p-logg').checked = !!P.logg; $('p-ned').value = P.ned || 0; $('p-opp').value = P.opp || 0; $('p-kurv').checked = !!P.kurv; $('p-par-ned').value = String(P.parNed || 3); $('p-par-opp').value = String(P.parOpp || 3); (async () => { try { $('p-autostart').checked = await window.__TAURI__.autostart.isEnabled(); } catch { /* */ } })(); $('p-v-feil').checked = !!P.vFeil; $('p-v-ferdig').checked = !!P.vFerdig; }
   $('p-fastmaal').onchange = () => { P.fastMaal = $('p-fastmaal').checked; lagreP(); };
+  $('p-bekreft-ned').checked = P.bekreftNed !== false;
+  $('p-bekreft-ned').onchange = () => { P.bekreftNed = $('p-bekreft-ned').checked; lagreP(); };
   $('p-velg-maal').onclick = async () => { const v = await open({ directory: true, multiple: false, title: t.velgMaal }); if (v) { maal = v; await store.set('maal', v); visMaal(); $('p-maal-sti').textContent = v; } };
   $('p-konflikt').onchange = () => { P.konflikt = $('p-konflikt').value; lagreP(); };
   $('p-oppkonflikt').onchange = () => { P.oppKonflikt = $('p-oppkonflikt').value; lagreP(); };
@@ -1202,8 +1240,81 @@
   }, 8000);
   document.addEventListener('click', e => { if (!e.target.closest('.meny') && !e.target.closest('.meny-knapp')) document.querySelectorAll('.meny.åpen').forEach(m => m.classList.remove('åpen')); });
   const typeIkon = ty => ty === 'opp' ? '⤒' : ty === 'inn' ? '⇪' : '⤓';
-  function startJobb(navn, filer, mappeId, erMappe, type = 'ned') {
-    if (type !== 'opp' && (!maal || !P.fastMaal)) { return open({ directory: true, multiple: false, title: t.velgMaal }).then(async v => { if (!v) return; maal = v; await store.set('maal', v); visMaal(); startJobbNaa(navn, filer, mappeId, erMappe, type); }); }
+  // ── BEKREFT NEDLASTING ────────────────────────────────────────────────
+  // (19/9, Vegard: «bør man få opp en modal for å bekrefte der istedenfor at
+  // den starter med én gang … hadde jeg valgt en disk som var full».)
+  //
+  // Nedlastinger som kommer fra en deep-link startet uten at brukeren hadde
+  // rørt appen — første tegn på at noe skjedde var at disken fyltes. Modalen
+  // svarer på hva, hvor mye og hvor FØR noe skrives, og sjekker ledig plass.
+  //
+  // ⚠ GJELDER BARE NEDLASTING. En opplasting er alltid noe brukeren nettopp
+  // har pekt ut i appen selv; der er en bekreftelse bare et ekstra klikk.
+  let nedSvar = null;
+  // `under` = undermappa jobben lager (delings-/mappenavnet), eller '' når
+  // filene legges rett i rotmappa. Holdes for seg så «Endre …» bare bytter
+  // ROTA — å lime sammen strenger og klippe dem opp igjen brakk på Windows,
+  // der separatoren er «\» og ikke «/».
+  function bekreftNed(navn, filer, rot, under) {
+    const bytes = filer.reduce((s, f) => s + (f.bytes || 0), 0);
+    const helSti = () => under ? `${rot}/${under}` : rot;
+    return new Promise(async res => {
+      nedSvar = res;
+      $('ned-tittel').textContent = navn;
+      $('ned-meta').textContent = `${antFiler(filer.length)} · ${fmt(bytes)}`;
+      $('ned-ikke-spor').checked = false;
+      const tegn = async () => {
+        $('ned-sti').textContent = helSti();
+        // Plass-sjekken er best-effort: nettverksdisker og enkelte monteringer
+        // svarer ikke. Da sier vi ingenting heller enn å gjette.
+        let ledig = null;
+        try { ledig = await invoke('ledig_plass', { sti: helSti() }); } catch { /* ukjent */ }
+        const boks = $('ned-plass');
+        if (ledig == null) { boks.className = 'ned-plass'; boks.textContent = ''; $('ned-start').textContent = t.nedStart; return; }
+        const nok = ledig >= bytes;
+        boks.className = 'ned-plass' + (nok ? '' : ' for-lite');
+        boks.textContent = nok
+          ? `${t.nedLedig} ${fmt(ledig)}`
+          : `${t.nedForLite} ${fmt(bytes - ledig)} (${t.nedLedig.toLowerCase()} ${fmt(ledig)})`;
+        // Ikke sperret — plass-tall kan ta feil — men knappen sier tydelig hva
+        // man gjør, så et uhell krever at man leser og trykker likevel.
+        $('ned-start').textContent = nok ? t.nedStart : t.nedLikevel;
+      };
+      await tegn();
+      $('ned-bak').classList.add('åpen');
+      $('ned-endre').onclick = async () => {
+        const v = await open({ directory: true, multiple: false, title: t.velgMaal });
+        if (!v) return;
+        // Bytter man mappe her, blir det den nye standarden — ellers måtte man
+        // endre to steder for det samme.
+        rot = v; maal = v; await store.set('maal', v); visMaal(); $('p-maal-sti').textContent = v;
+        await tegn();
+      };
+      $('ned-avbryt').onclick = () => lukkNed(null);
+      $('ned-start').onclick = () => lukkNed({ ikkeSpor: $('ned-ikke-spor').checked });
+    });
+  }
+  function lukkNed(svar) {
+    $('ned-bak').classList.remove('åpen');
+    const r = nedSvar; nedSvar = null;
+    if (r) r(svar);
+  }
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('ned-bak').classList.contains('åpen')) lukkNed(null); });
+
+  async function startJobb(navn, filer, mappeId, erMappe, type = 'ned') {
+    if (type !== 'opp' && (!maal || !P.fastMaal)) {
+      const v = await open({ directory: true, multiple: false, title: t.velgMaal });
+      if (!v) return;
+      maal = v; await store.set('maal', v); visMaal();
+    }
+    if (type === 'ned' && P.bekreftNed !== false) {
+      // Samme regel som startJobbNaa bruker — brukeren skal se nøyaktig hvor
+      // filene havner, ikke bare rotmappa.
+      const under = (erMappe && (mappeId || filer.some(f => f.url))) ? navn.replace(/[\\/:*?"<>|]+/g, '_') : '';
+      const svar = await bekreftNed(navn, filer, maal, under);
+      if (!svar) return;
+      if (svar.ikkeSpor) { P.bekreftNed = false; $('p-bekreft-ned').checked = false; lagreP(); }
+    }
     startJobbNaa(navn, filer, mappeId, erMappe, type);
   }
   function startJobbNaa(navn, filer, mappeId, erMappe, type, ekstra = {}) {
@@ -1547,8 +1658,14 @@
       const mm = String(url).match(/^rawskap:\/\/mappe\/(rec[A-Za-z0-9]{14})/);
       if (mm) { if (!nokkel || !data) { $('kobling-status').textContent = t.kobleForst; return; } const d = await invoke('hent_liste', { portal, nokkel, mappe: mm[1] }); visOverfVisning(true); startJobb(mappeNavn(mm[1]) || 'Mappe', d.filer, mm[1], true); return; }
       const m = String(url).match(/^rawskap:\/\/deling\/([A-Za-z0-9_-]+)/); if (!m) return;
+      // ADGANGSNØKKEL (19/9): passord-/inviterte delinger legger ved ?n=<nøkkel>
+      // — en kortlevd signert nøkkel delingssida utsteder når porten er passert.
+      // Cookien som beviser det bor i nettleseren og når aldri hit, så uten
+      // dette svarte serveren 401 og knappen var skjult på låste delinger.
+      let adgang = '';
+      try { adgang = new URL(String(url).replace(/^rawskap:/, 'https:')).searchParams.get('n') || ''; } catch { /* uten query */ }
       const p = ($('portal').value || 'https://rawskap.no').trim().replace(/\/$/, '');
-      const d = await invoke('hent_deling', { portal: p, token: m[1] });
+      const d = await invoke('hent_deling', { portal: p, token: m[1], nokkel: adgang });
       const filer = (d.filer || []).map(f => ({ id: f.id, filnavn: f.filnavn, bytes: f.bytes, sti: f.sti || '', xxh64: f.xxh64 || '', url: f.url }));
       if (!filer.length) { $('overf-tekst').textContent = t.ingenOverf; return; }
       if (!portal) portal = p; // ikke innlogget: nedlasting trenger ikke nøkkel
@@ -1563,7 +1680,13 @@
     const s = String(inn || '').trim();
     if (!s) return '';
     const m = s.match(/rawskap:\/\/deling\/([A-Za-z0-9_-]{6,40})/) || s.match(/\/(?:d|rawvare\/samling)\/([A-Za-z0-9_-]{6,40})/) || s.match(/^([A-Za-z0-9_-]{6,40})$/);
-    return m ? `rawskap://deling/${m[1]}` : '';
+    if (!m) return '';
+    // ⚠ BEHOLD ?n= (19/9). Funksjonen plukket før bare ut tokenet og kastet
+    // resten, så en lenke med adgangsnøkkel mistet nøkkelen her — og en låst
+    // deling ville fått 401 selv om brukeren limte inn riktig lenke.
+    let n = '';
+    try { n = new URL(s.replace(/^rawskap:/, 'https:')).searchParams.get('n') || ''; } catch { /* bare token/kode */ }
+    return `rawskap://deling/${m[1]}${n ? `?n=${encodeURIComponent(n)}` : ''}`;
   }
   async function apneDelingFraFelt(feltId = 'deling-lenke', feilId = 'deling-feil') {
     const felt = $(feltId); const feil = $(feilId);

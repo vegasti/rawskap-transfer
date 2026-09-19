@@ -1,6 +1,6 @@
 [package]
 name = "rawskap-transfer"
-version = "0.2.10"
+version = "0.2.11"
 description = "Rawskap Transfer - store overforinger til og fra skapet"
 authors = ["Raw Studios AS"]
 license = ""
@@ -40,3 +40,6 @@ bytes = "1"
 base64 = "0.22"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 dirs = "6"
+# Ledig diskplass (19/9) — std har ingen vei til det. fs2 er en tynn innpakning
+# rundt GetDiskFreeSpaceExW/statvfs; brukes bare av `ledig_plass`.
+fs2 = "0.4"

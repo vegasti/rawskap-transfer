@@ -1349,6 +1349,30 @@ fn vis_i_utforsker(sti: String) -> Result<(), String> {
 #[tauri::command]
 async fn er_mappe(sti: String) -> bool { tokio::fs::metadata(&sti).await.map(|m| m.is_dir()).unwrap_or(false) }
 
+/// Ledig plass i bytes på disken stien ligger på.
+///
+/// HVORFOR (19/9, Vegard): han startet en nedlasting mot en disk som var full,
+/// og fikk ikke vite det før jobben hadde rotet seg bort i halvskrevne filer.
+/// Bekreftelsesmodalen spør om dette FØR den starter, og kan da si «trenger
+/// 45 GB, har 12 ledig» i stedet for å feile på fil nummer 300.
+///
+/// ⚠ MÅLMAPPA FINNES OFTE IKKE ENNÅ — den lages først når jobben starter
+/// (`{maal}/{delingsnavn}`). Derfor går vi oppover til nærmeste forelder som
+/// faktisk finnes; ellers ville hver eneste sjekk svart med en feil i stedet
+/// for tallet vi er ute etter.
+#[tauri::command]
+fn ledig_plass(sti: String) -> Result<u64, String> {
+    let mut p = std::path::PathBuf::from(&sti);
+    loop {
+        if p.exists() { break; }
+        match p.parent() {
+            Some(f) if !f.as_os_str().is_empty() => p = f.to_path_buf(),
+            _ => return Err(format!("fant ingen eksisterende mappe i «{sti}»")),
+        }
+    }
+    fs2::available_space(&p).map_err(|e| format!("{e}"))
+}
+
 // ── SYNK-MAPPER (22/8): en lokal mappe speiles til en mappe i skapet.
 // Polling hvert 20. s (virker på NAS/nettverksdisk der fil-hendelser er
 // upålitelige). En fil er «ferdig skrevet» når størrelse+mtime er uendret
@@ -1434,10 +1458,18 @@ async fn synk_merk(st: State<'_, SynkTilstand>, id: String, filer: Vec<OppFil>, 
 }
 
 /// Deling → fil-liste (token = auth). Brukes av rawskap://deling/<token>.
+///
+/// `nokkel` er en KORTLEVD ADGANGSNØKKEL for passord-/inviterte delinger
+/// (19/9). Token-kunnskap alene holder ikke der: serveren krever at man har
+/// passert porten. Cookien som beviser det bor i nettleseren og kan ikke nå
+/// hit, så delingssiden signerer i stedet en nøkkel som gjelder i 10 minutter
+/// og legger den i deep-linken. Tom streng for åpne delinger.
 #[tauri::command]
-async fn hent_deling(portal: String, token: String) -> Result<serde_json::Value, String> {
+async fn hent_deling(portal: String, token: String, nokkel: Option<String>) -> Result<serde_json::Value, String> {
     let k = reqwest::Client::new();
-    let r = k.get(format!("{}/api/bildebank/samling/transfer-liste?token={}", portal.trim_end_matches('/'), token)).send().await.map_err(|e| format!("{e}"))?;
+    let n = nokkel.unwrap_or_default();
+    let hale = if n.is_empty() { String::new() } else { format!("&n={}", urlenc(&n)) };
+    let r = k.get(format!("{}/api/bildebank/samling/transfer-liste?token={}{}", portal.trim_end_matches('/'), token, hale)).send().await.map_err(|e| format!("{e}"))?;
     let st = r.status().as_u16();
     let d: serde_json::Value = r.json().await.map_err(|e| format!("{e}"))?;
     if !(200..300).contains(&st) { return Err(d["error"].as_str().unwrap_or("Kunne ikke hente delingen").to_string()); }
@@ -1745,7 +1777,7 @@ pub fn run() {
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
         .invoke_handler(tauri::generate_handler![avbryt_fil, les_lokal,
-            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, last_inn, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
+            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, last_inn, hent_liste, hent_deling, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, ledig_plass, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
@@ -1758,6 +1790,33 @@ pub fn run() {
 #[cfg(test)]
 mod tester {
     use super::*;
+
+    /// `ledig_plass` må tåle at målmappa ikke finnes ennå — den lages først når
+    /// jobben starter. Uten oppoverklatringen ville bekreftelsesmodalen aldri
+    /// fått et tall å vise, og plass-sjekken (hele grunnen til at den finnes)
+    /// hadde vært stille i det vanligste tilfellet.
+    #[test]
+    fn ledig_plass_klatrer_til_mappe_som_finnes() {
+        let rot = std::env::temp_dir();
+        let dyp = rot.join("rawskap-finnes-ikke").join("heller-ikke-denne");
+        assert!(!dyp.exists(), "testen forutsetter at stien ikke finnes");
+
+        let svar = ledig_plass(dyp.to_string_lossy().to_string());
+        assert!(svar.is_ok(), "skulle funnet en forelder som finnes: {svar:?}");
+        assert!(svar.unwrap() > 0, "en disk med 0 ledig er mistenkelig — trolig feil sti");
+
+        // Samme disk, eksisterende mappe: skal gi omtrent samme tall.
+        let direkte = ledig_plass(rot.to_string_lossy().to_string()).unwrap();
+        let via_klatring = ledig_plass(dyp.to_string_lossy().to_string()).unwrap();
+        let avvik = direkte.abs_diff(via_klatring);
+        assert!(avvik < 5 << 30, "samme disk skal gi samme svar (avvik {avvik} bytes)");
+    }
+
+    /// En sti uten forelder i det hele tatt skal gi feil, ikke panikk.
+    #[test]
+    fn ledig_plass_paa_tom_sti_feiler_pent() {
+        assert!(ledig_plass(String::new()).is_err());
+    }
 
     /// Delene skal dekke fila NØYAKTIG én gang: ingen hull, ingen overlapp, siste del kortere.
     /// Kjøres for flere delstørrelser fordi tallet ble endret 17/9 (64 → 16 MB) mens gamle,
