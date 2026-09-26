@@ -49,6 +49,10 @@ window.__TAURI__ = (() => {
     return null;
   };
   const butikk = new Map([['kobling', { portal: 'https://rawskap.no', nokkel: 'x' }], ['maal', 'C:/ned']]);
+  // ?ko=1: en uferdig opplastingsjobb i køen fra forrige økt — én fil ble aldri ferdig, én ble
+  // hoppet over (fantes fra før). Brukes av sjekken for «Fjern» (0.3.0).
+  if (/[?&]ko=1/.test(location.search)) butikk.set('ko', [{ id: 'jtest', type: 'opp', navn: 'Test-opplasting', status: 'feil', mappeId: 'm1', feil: [],
+    filer: [{ sti: 'C:/test/a.arw', relativ: 'a.arw', bytes: 30000000, filnavn: 'a.arw' }, { sti: 'C:/test/b.arw', relativ: 'b.arw', bytes: 30000000, filnavn: 'b.arw', hopp: true }] }]);
   return {
     core: { invoke },
     event: { listen: async () => () => {} },
@@ -155,7 +159,29 @@ window.__TAURI__ = (() => {
     sjekk('overskriftsraden ligger flush med toppen av rullefeltet', m.gapOver, 0);
     sjekk('hode og rad har samme kolonner', m.hodeKolonner === m.radKolonner, true);
 
-    console.log('\n6. Konsoll');
+    console.log('\n6. Om-fanen: loggmappa (0.3.0)');
+    sjekk('knappen «Åpne loggmappa» finnes', await ev(`!!document.getElementById('om-loggmappe')`), true);
+    sjekk('og ber Rust åpne mappa', await ev(`(async () => { document.getElementById('om-loggmappe').click(); await new Promise(r => setTimeout(r, 150)); return window.__kall.some(k => k.cmd === 'apne_loggmappe'); })()`), true);
+
+    console.log('\n7. «Fjern» på en uferdig opplasting rydder hos serveren (0.3.0)');
+    await send('Page.navigate', { url: 'file:///' + fil.replace(/\\/g, '/') + '?ko=1' });
+    await sov(3500);
+    const forkastet = await ev(`(async () => {
+      document.getElementById('vis-overf').click();
+      await new Promise(r => setTimeout(r, 300));
+      const rad = [...document.querySelectorAll('#overf-panel .jobbrad:not(.hode)')].find(r => /Test-opplasting/.test(r.textContent));
+      if (!rad) return 'fant ikke jobben';
+      rad.querySelector('.meny-knapp').click();
+      const fjern = [...rad.querySelectorAll('.meny button')].find(b => /^Fjern/.test(b.textContent.trim()));
+      if (!fjern) return 'fant ikke Fjern';
+      fjern.click();
+      await new Promise(r => setTimeout(r, 200));
+      const k = window.__kall.find(k => k.cmd === 'forkast_opplasting');
+      return k ? k.args.filer.map(f => f.sti) : 'ikke kalt';
+    })()`);
+    sjekk('forkast_opplasting får fila som ikke ble ferdig — ikke den som ble hoppet over', forkastet, ['C:/test/a.arw']);
+
+    console.log('\n8. Konsoll');
     const konsoll = feil.filter(f => typeof f === 'string' && /Error|error/.test(f));
     sjekk('ingen unntak i konsollen', konsoll.length, 0);
     if (konsoll.length) console.log('   ', JSON.stringify(konsoll.slice(0, 5)));

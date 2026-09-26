@@ -14,8 +14,18 @@ npm run tauri build  # produksjonsbygg
 
 ffmpeg-sidecaren ligger ikke i repoet: legg et statisk bygg i `src-tauri/binaries/`
 som `ffmpeg-x86_64-pc-windows-msvc.exe` (Windows) eller `ffmpeg-aarch64-apple-darwin`
-(macOS). CI (`.github/workflows/macos.yml`) laster den ned selv, bygger, signerer
-med Developer ID og notariserer hos Apple.
+(macOS). CI (`.github/workflows/bygg.yml`) laster den ned selv, kjører testene, bygger
+Windows og Mac (arm64 + Intel), signerer Mac-byggene med Developer ID og sender dem til notarisering.
+
+## Tester
+
+```bash
+npm test             # Rust (cargo test) + grensesnitt-riggen (headless Chrome)
+```
+
+Rust-testene kjører opp- og nedlastingsløypa mot en falsk portal og et falskt lager som kan
+kutte forbindelsen, svare 500/403 eller slutte å lese — se `mod tester` i `src-tauri/src/lib.rs`.
+Loggen ligger i appens loggmappe (Innstillinger → Om → «Åpne loggmappa»).
 
 ## Lisens
 

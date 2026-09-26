@@ -167,6 +167,11 @@ jobs:
 
       - run: npm ci
 
+      # TESTENE FØRST (0.3.0): opp- og nedlastingsløypa (omforsøk, gjenopptak, stopp-vakt) kjøres
+      # mot en falsk portal og et falskt lager. Et bygg som bryter dem, skal aldri bli en utgivelse.
+      - name: Tester (Rust)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
       - name: Bygg (nsis + msi)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
