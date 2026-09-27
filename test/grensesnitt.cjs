@@ -51,6 +51,10 @@ window.__TAURI__ = (() => {
     return null;
   };
   const butikk = new Map([['kobling', { portal: 'https://rawskap.no', nokkel: 'x' }], ['maal', 'C:/ned']]);
+  // Selvoppdateringen av Lightroom-pluginen venter 15 s i appen — i riggen 300 ms.
+  window.__lrAutoMs = 300;
+  // ?lrav=1: brukeren har slått av «Oppdater automatisk».
+  if (/[?&]lrav=1/.test(location.search)) butikk.set('pref', { lrAuto: false });
   // ?ko=1: en uferdig opplastingsjobb i køen fra forrige økt — én fil ble aldri ferdig, én ble
   // hoppet over (fantes fra før). Brukes av sjekken for «Fjern» (0.3.0).
   if (/[?&]ko=1/.test(location.search)) butikk.set('ko', [{ id: 'jtest', type: 'opp', navn: 'Test-opplasting', status: 'feil', mappeId: 'm1', feil: [],
@@ -62,7 +66,7 @@ window.__TAURI__ = (() => {
     shell: { open: async () => {} },
     app: { getVersion: async () => '0.2.8' },
     store: { load: async () => ({ get: async k => butikk.get(k), set: async (k, v) => { butikk.set(k, v); }, save: async () => {} }) },
-    notification: { isPermissionGranted: async () => false, requestPermission: async () => 'denied', sendNotification: () => {} },
+    notification: { isPermissionGranted: async () => true, requestPermission: async () => 'granted', sendNotification: (o) => { (window.__varsler = window.__varsler || []).push(o); } },
     autostart: { isEnabled: async () => false, enable: async () => {}, disable: async () => {} },
     webview: { getCurrentWebview: () => ({ onDragDropEvent: async () => () => {} }) },
   };
@@ -166,6 +170,10 @@ window.__TAURI__ = (() => {
     sjekk('og ber Rust åpne mappa', await ev(`(async () => { document.getElementById('om-loggmappe').click(); await new Promise(r => setTimeout(r, 150)); return window.__kall.some(k => k.cmd === 'apne_loggmappe'); })()`), true);
 
     console.log('\n6b. Lightroom-fanen (0.3.1)');
+    // Selvoppdateringen har alt kjørt (300 ms etter oppstart): stubben sier 1.1.0 installert, 1.2.1 ute.
+    const auto = await ev(`({ kall: window.__kall.filter(k => k.cmd === 'installer_lightroom').length, varsler: (window.__varsler || []).filter(v => /Lightroom/.test(v.title)).map(v => v.title + ' | ' + v.body) })`);
+    sjekk('selvoppdateringen installerte den nye versjonen', auto.kall, 1);
+    sjekk('og sa fra med et skrivebordsvarsel', auto.varsler, ['Lightroom-pluginen er oppdatert | Versjon 1.2.1 er installert — start Lightroom på nytt for å ta den i bruk.']);
     const lr = await ev(`(async () => {
       document.querySelector('[data-side="lightroom"]').click();
       await new Promise(r => setTimeout(r, 200));
@@ -174,14 +182,20 @@ window.__TAURI__ = (() => {
       const synlig = document.getElementById('side-lightroom').classList.contains('på');
       document.getElementById('lr-installer').click();
       await new Promise(r => setTimeout(r, 200));
-      const kall = window.__kall.find(k => k.cmd === 'installer_lightroom');
-      return { synlig, status, knapp, installert: !!kall, etter: document.getElementById('lr-status').textContent };
+      const kall = window.__kall.filter(k => k.cmd === 'installer_lightroom').length;
+      return { synlig, status, knapp, installert: kall === 2, etter: document.getElementById('lr-status').textContent, bryter: document.getElementById('p-lr-auto').checked };
     })()`);
     sjekk('fanen åpner seg', lr.synlig, true);
     sjekk('statusen viser installert og ny versjon', lr.status, 'Installert: 1.1.0 · ny versjon 1.2.1');
     sjekk('knappen sier «Oppdater»', lr.knapp, 'Oppdater');
     sjekk('knappen ber Rust installere', lr.installert, true);
     sjekk('og sier fra etterpå', lr.etter, '1.2.1 installert — start Lightroom på nytt');
+
+    console.log('\n6c. «Oppdater automatisk» av (0.3.3)');
+    await send('Page.navigate', { url: 'file:///' + fil.replace(/\\/g, '/') + '?lrav=1' });
+    await sov(2500);
+    sjekk('bryteren av → ingen selvoppdatering', await ev(`window.__kall.filter(k => k.cmd === 'installer_lightroom').length`), 0);
+    sjekk('og bryteren vises som av', await ev(`(async () => { document.getElementById('vis-innst').click(); await new Promise(r => setTimeout(r, 200)); return document.getElementById('p-lr-auto').checked; })()`), false);
 
     console.log('\n7. «Fjern» på en uferdig opplasting rydder hos serveren (0.3.0)');
     await send('Page.navigate', { url: 'file:///' + fil.replace(/\\/g, '/') + '?ko=1' });
