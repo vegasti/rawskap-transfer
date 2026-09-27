@@ -2159,6 +2159,128 @@ async fn les_lokal(sti: String) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({ "mapper": mapper, "filer": filer }))
 }
 
+// ── LIGHTROOM-PLUGINEN (0.3.1, 27/9) ─────────────────────────────────────────────────────────
+// Transfer installerer og oppdaterer Rawskap-pluginen for Lightroom Classic. Lightroom laster plugins
+// som ligger i Modules-mappa automatisk når det starter — ingen Plugin-behandler, ingen «Legg til».
+//   Windows: %APPDATA%\Adobe\Lightroom\Modules    Mac: ~/Library/Application Support/Adobe/Lightroom/Modules
+// Hvorfor HER og ikke en egen installer (Vegards valg 27/9): Mac-appen er alt signert og notarisert,
+// så ingen nye sertifikater trengs, og samme løype blir selvoppdateringen senere.
+// Pakken og sjekksummen kommer fra manifestet (portal: /api/lightroom/versjon, skrevet av
+// verktoy/publiser-lightroom.mjs). ⚠ Uten riktig sha256 installeres ingenting — det er kode som
+// Lightroom kjører.
+const LR_MAPPE: &str = "rawskap.lrdevplugin";
+
+fn lightroom_moduler() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("Adobe").join("Lightroom").join("Modules"))
+}
+
+/// VERSION fra Info.lua («major = 1, minor = 2, revision = 0» → "1.2.0").
+fn les_lua_versjon(info: &str) -> Option<String> {
+    let resten = &info[info.find("VERSION =")?..];
+    let tall = |navn: &str| -> Option<u64> {
+        let i = resten.find(navn)? + navn.len();
+        let s = resten[i..].trim_start().strip_prefix('=')?.trim_start();
+        s.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().ok()
+    };
+    Some(format!("{}.{}.{}", tall("major")?, tall("minor")?, tall("revision")?))
+}
+
+fn sha256_hex(b: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(b).iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Pakker ut plugin-zip-en til `<moduler>/rawskap.lrdevplugin`.
+///
+/// ⚠ Aldri en halv plugin: alt pakkes ut i en midlertidig mappe ved siden av, den gamle flyttes unna,
+/// den nye inn, og først da slettes den gamle. Feiler et steg, står den gamle urørt.
+/// ⚠ Bare filer under rawskap.lrdevplugin/ godtas, og ingen stier som klatrer ut (zip-slip).
+fn pakk_ut_lightroom(zip_bytes: &[u8], moduler: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(moduler).map_err(|e| format!("Kunne ikke lage {}: {e}", moduler.display()))?;
+    let suffiks = rand_suffiks();
+    let tmp = moduler.join(format!(".rawskap-ny-{suffiks}"));
+    let utpakket = (|| -> Result<(), String> {
+        let mut arkiv = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).map_err(|e| format!("Pakken er ødelagt: {e}"))?;
+        for i in 0..arkiv.len() {
+            let mut fil = arkiv.by_index(i).map_err(|e| format!("Pakken er ødelagt: {e}"))?;
+            let navn = fil.enclosed_name().ok_or("Pakken har en ugyldig sti")?;
+            let rot = navn.components().next().and_then(|c| match c { std::path::Component::Normal(s) => s.to_str(), _ => None });
+            if rot != Some(LR_MAPPE) { return Err("Pakken har filer utenfor plugin-mappa".into()); }
+            let mal = tmp.join(&navn);
+            if fil.is_dir() { std::fs::create_dir_all(&mal).map_err(|e| format!("{e}"))?; continue; }
+            if let Some(d) = mal.parent() { std::fs::create_dir_all(d).map_err(|e| format!("{e}"))?; }
+            let mut ut = std::fs::File::create(&mal).map_err(|e| format!("{e}"))?;
+            std::io::copy(&mut fil, &mut ut).map_err(|e| format!("{e}"))?;
+        }
+        if !tmp.join(LR_MAPPE).join("Info.lua").is_file() { return Err("Pakken mangler Info.lua".into()); }
+        Ok(())
+    })();
+    if let Err(e) = utpakket { let _ = std::fs::remove_dir_all(&tmp); return Err(e); }
+    let endelig = moduler.join(LR_MAPPE);
+    let gammel = moduler.join(format!(".rawskap-gammel-{suffiks}"));
+    let hadde = endelig.exists();
+    if hadde {
+        if let Err(e) = std::fs::rename(&endelig, &gammel) {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(format!("Fikk ikke byttet ut den gamle pluginen — er Lightroom åpent? Lukk det og prøv igjen ({e})"));
+        }
+    }
+    if let Err(e) = std::fs::rename(tmp.join(LR_MAPPE), &endelig) {
+        if hadde { let _ = std::fs::rename(&gammel, &endelig); }
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!("Fikk ikke lagt pluginen på plass: {e}"));
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    if hadde { let _ = std::fs::remove_dir_all(&gammel); }
+    Ok(endelig)
+}
+
+/// Hva er installert, og hva er ute? `tilgjengelig` er tom hvis manifestet ikke kunne leses.
+#[tauri::command]
+async fn lightroom_status(portal: String) -> serde_json::Value {
+    let moduler = lightroom_moduler();
+    // Adobe/Lightroom-mappa finnes når Lightroom har kjørt på maskinen minst én gang.
+    let lightroom = moduler.as_ref().and_then(|m| m.parent()).map(|p| p.is_dir()).unwrap_or(false);
+    let installert = moduler.as_ref()
+        .and_then(|m| std::fs::read_to_string(m.join(LR_MAPPE).join("Info.lua")).ok())
+        .and_then(|s| les_lua_versjon(&s));
+    let url = format!("{}/api/lightroom/versjon", portal.trim_end_matches('/'));
+    let tilgjengelig = match enkel_klient().get(url).send().await {
+        Ok(r) => r.json::<serde_json::Value>().await.ok().and_then(|m| m["versjon"].as_str().map(|s| s.to_string())).unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+    serde_json::json!({
+        "lightroom": lightroom, "installert": installert, "tilgjengelig": tilgjengelig,
+        "sti": moduler.map(|m| m.join(LR_MAPPE).to_string_lossy().to_string()).unwrap_or_default(),
+    })
+}
+
+/// Last ned pluginen fra manifestet, sjekk sha256, og legg den i Lightrooms Modules-mappe.
+#[tauri::command]
+async fn installer_lightroom(portal: String) -> Result<serde_json::Value, String> {
+    let moduler = lightroom_moduler().ok_or("Fant ikke brukermappa")?;
+    installer_lightroom_til(&portal, &moduler).await
+}
+
+/// Selve installasjonen, med målmappa som parameter — så testen kan kjøre hele løypa mot den ekte
+/// pakken i prod uten å røre Lightroom på maskina den kjøres på.
+async fn installer_lightroom_til(portal: &str, moduler: &Path) -> Result<serde_json::Value, String> {
+    let portal = portal.trim_end_matches('/');
+    let k = enkel_klient();
+    let m: serde_json::Value = k.get(format!("{portal}/api/lightroom/versjon")).send().await.map_err(nettfeil)?.json().await.map_err(nettfeil)?;
+    let versjon = m["versjon"].as_str().unwrap_or("").to_string();
+    let url = m["zip"].as_str().unwrap_or("").to_string();
+    let fasit = m["sha256"].as_str().unwrap_or("").to_ascii_lowercase();
+    if versjon.is_empty() || !url.starts_with("https://") { return Err("Fant ingen Lightroom-plugin å installere".into()); }
+    if fasit.len() != 64 { return Err("Manifestet mangler sjekksum — installerer ikke".into()); }
+    let bytes = k.get(&url).send().await.map_err(nettfeil)?.error_for_status().map_err(nettfeil)?.bytes().await.map_err(nettfeil)?;
+    if bytes.len() > 20 << 20 { return Err("Pakken er uventet stor — installerer ikke".into()); }
+    if sha256_hex(&bytes) != fasit { return Err("Pakken stemmer ikke med sjekksummen — installerer ikke".into()); }
+    let sti = pakk_ut_lightroom(&bytes, moduler)?;
+    log::info!("Lightroom-pluginen {versjon} installert i {}", sti.display());
+    Ok(serde_json::json!({ "versjon": versjon, "sti": sti.to_string_lossy() }))
+}
+
 /// «Fjern» på en opplasting som ikke ble ferdig (0.3.0): rydd opp etter den med én gang.
 ///
 /// Før ble bare raden i køen fjernet. Resume-fila, den åpne multiparten hos lageret og raden i
@@ -2274,7 +2396,7 @@ pub fn run() {
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
         .invoke_handler(tauri::generate_handler![avbryt_fil, les_lokal,
-            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, last_inn, hent_liste, hent_deling, deling_passord, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, ledig_plass, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn, forkast_opplasting, apne_loggmappe])
+            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, last_inn, hent_liste, hent_deling, deling_passord, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, ledig_plass, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn, forkast_opplasting, apne_loggmappe, lightroom_status, installer_lightroom])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
@@ -2766,5 +2888,81 @@ mod tester {
             let l = m.lager.lock().unwrap();
             assert_eq!(l.handlinger("avbryt")[0]["originalKeys"], serde_json::json!(["originals/forkast.bin"]));
         });
+    }
+
+    // ── LIGHTROOM-INSTALLASJONEN (0.3.1) ──
+    fn lr_zip(filer: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::Write;
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opt = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for (navn, innhold) in filer { w.start_file(*navn, opt).unwrap(); w.write_all(innhold.as_bytes()).unwrap(); }
+        w.finish().unwrap().into_inner()
+    }
+    fn lr_moduler(navn: &str) -> PathBuf {
+        let d = std::env::temp_dir().join("rawskap-transfer-test").join("lr").join(navn).join("Modules");
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+    const INFO: &str = "return {\n  LrToolkitIdentifier = 'no.rawstudios.rawskap',\n  -- ⚠ Må være lik Api.VERSJON\n  VERSION = { major = 1, minor = 2, revision = 3 },\n}\n";
+
+    #[test]
+    fn lua_versjonen_leses_fra_info() {
+        assert_eq!(les_lua_versjon(INFO).as_deref(), Some("1.2.3"));
+        assert_eq!(les_lua_versjon("return {}"), None);
+    }
+
+    #[test]
+    fn sha256_er_riktig() {
+        assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    /// Ny installasjon, og så en oppdatering som bytter ut den gamle helt — uten rester.
+    #[test]
+    fn lightroom_installeres_og_byttes_ut() {
+        let m = lr_moduler("bytt");
+        let v1 = lr_zip(&[("rawskap.lrdevplugin/Info.lua", INFO), ("rawskap.lrdevplugin/Gammel.lua", "-- skal forsvinne")]);
+        let sti = pakk_ut_lightroom(&v1, &m).unwrap();
+        assert!(sti.join("Info.lua").is_file() && sti.join("Gammel.lua").is_file());
+        let v2 = lr_zip(&[("rawskap.lrdevplugin/Info.lua", &INFO.replace("revision = 3", "revision = 4"))]);
+        pakk_ut_lightroom(&v2, &m).unwrap();
+        let info = std::fs::read_to_string(m.join(LR_MAPPE).join("Info.lua")).unwrap();
+        assert_eq!(les_lua_versjon(&info).as_deref(), Some("1.2.4"));
+        assert!(!m.join(LR_MAPPE).join("Gammel.lua").exists(), "filer fra forrige versjon skal ikke henge igjen");
+        let rester: Vec<_> = std::fs::read_dir(&m).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        assert_eq!(rester, vec![LR_MAPPE.to_string()], "ingen midlertidige mapper skal bli liggende");
+    }
+
+    /// Hele løypa mot PROD: manifest → pakke → sha256 → utpakking, i en midlertidig mappe.
+    /// Går mot nettet, så den kjøres bare på forespørsel:  cargo test --lib -- --ignored lightroom_fra_prod
+    #[test]
+    #[ignore]
+    fn lightroom_fra_prod() {
+        let m = lr_moduler("prod");
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let svar = rt.block_on(installer_lightroom_til("https://rawskap.no", &m)).expect("installasjonen feilet");
+        let info = std::fs::read_to_string(m.join(LR_MAPPE).join("Info.lua")).unwrap();
+        assert_eq!(les_lua_versjon(&info).as_deref(), svar["versjon"].as_str(), "installert versjon = manifestets");
+        for f in ["RawskapApi.lua", "RawskapPublish.lua", "RawskapJson.lua"] { assert!(m.join(LR_MAPPE).join(f).is_file(), "{f} mangler"); }
+        println!("installert {} i {}", svar["versjon"], m.display());
+    }
+
+    /// Farlige eller feil pakker installeres ikke — og den som alt er installert, står urørt.
+    #[test]
+    fn lightroom_avviser_farlige_pakker() {
+        let m = lr_moduler("farlig");
+        pakk_ut_lightroom(&lr_zip(&[("rawskap.lrdevplugin/Info.lua", INFO)]), &m).unwrap();
+        for (hvorfor, pakke) in [
+            ("sti som klatrer ut", lr_zip(&[("rawskap.lrdevplugin/Info.lua", INFO), ("rawskap.lrdevplugin/../../ond.lua", "x")])),
+            ("fil utenfor plugin-mappa", lr_zip(&[("rawskap.lrdevplugin/Info.lua", INFO), ("annen/ond.lua", "x")])),
+            ("mangler Info.lua", lr_zip(&[("rawskap.lrdevplugin/Api.lua", "x")])),
+            ("ikke en zip", b"dette er ikke en zip".to_vec()),
+        ] {
+            assert!(pakk_ut_lightroom(&pakke, &m).is_err(), "{hvorfor} skulle blitt avvist");
+        }
+        assert!(!m.parent().unwrap().join("ond.lua").exists() && !m.join("ond.lua").exists());
+        let info = std::fs::read_to_string(m.join(LR_MAPPE).join("Info.lua")).unwrap();
+        assert_eq!(les_lua_versjon(&info).as_deref(), Some("1.2.3"), "den installerte skal stå urørt");
+        let rester: Vec<_> = std::fs::read_dir(&m).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        assert_eq!(rester, vec![LR_MAPPE.to_string()]);
     }
 }

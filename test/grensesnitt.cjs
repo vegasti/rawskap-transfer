@@ -46,6 +46,8 @@ window.__TAURI__ = (() => {
     if (cmd === 'mangler_lokalt') return ['a3', 'b2'];
     if (cmd === 'sjekk_versjon') return { ny: false };
     if (cmd === 'maskinnavn') return 'rigg';
+    if (cmd === 'lightroom_status') return { lightroom: true, installert: '1.1.0', tilgjengelig: '1.2.1', sti: 'C:/rigg/Modules/rawskap.lrdevplugin' };
+    if (cmd === 'installer_lightroom') return { versjon: '1.2.1', sti: 'C:/rigg/Modules/rawskap.lrdevplugin' };
     return null;
   };
   const butikk = new Map([['kobling', { portal: 'https://rawskap.no', nokkel: 'x' }], ['maal', 'C:/ned']]);
@@ -162,6 +164,24 @@ window.__TAURI__ = (() => {
     console.log('\n6. Om-fanen: loggmappa (0.3.0)');
     sjekk('knappen «Åpne loggmappa» finnes', await ev(`!!document.getElementById('om-loggmappe')`), true);
     sjekk('og ber Rust åpne mappa', await ev(`(async () => { document.getElementById('om-loggmappe').click(); await new Promise(r => setTimeout(r, 150)); return window.__kall.some(k => k.cmd === 'apne_loggmappe'); })()`), true);
+
+    console.log('\n6b. Lightroom-fanen (0.3.1)');
+    const lr = await ev(`(async () => {
+      document.querySelector('[data-side="lightroom"]').click();
+      await new Promise(r => setTimeout(r, 200));
+      const status = document.getElementById('lr-status').textContent;
+      const knapp = document.getElementById('lr-installer').textContent;
+      const synlig = document.getElementById('side-lightroom').classList.contains('på');
+      document.getElementById('lr-installer').click();
+      await new Promise(r => setTimeout(r, 200));
+      const kall = window.__kall.find(k => k.cmd === 'installer_lightroom');
+      return { synlig, status, knapp, installert: !!kall, etter: document.getElementById('lr-status').textContent };
+    })()`);
+    sjekk('fanen åpner seg', lr.synlig, true);
+    sjekk('statusen viser installert og ny versjon', lr.status, 'Installert: 1.1.0 · ny versjon 1.2.1');
+    sjekk('knappen sier «Oppdater»', lr.knapp, 'Oppdater');
+    sjekk('knappen ber Rust installere', lr.installert, true);
+    sjekk('og sier fra etterpå', lr.etter, '1.2.1 installert — start Lightroom på nytt');
 
     console.log('\n7. «Fjern» på en uferdig opplasting rydder hos serveren (0.3.0)');
     await send('Page.navigate', { url: 'file:///' + fil.replace(/\\/g, '/') + '?ko=1' });

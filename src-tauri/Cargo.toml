@@ -1,6 +1,6 @@
 [package]
 name = "rawskap-transfer"
-version = "0.3.0"
+version = "0.3.1"
 description = "Rawskap Transfer - store overforinger til og fra skapet"
 authors = ["Raw Studios AS"]
 license = "MIT"
@@ -43,3 +43,9 @@ dirs = "6"
 # Ledig diskplass (19/9) — std har ingen vei til det. fs2 er en tynn innpakning
 # rundt GetDiskFreeSpaceExW/statvfs; brukes bare av `ledig_plass`.
 fs2 = "0.4"
+# Lightroom-pluginen (0.3.1): Transfer pakker ut plugin-zip-en og sjekker sha256 før den legges i
+# Lightrooms Modules-mappe. Begge fantes alt i treet (via updater-pluginen) — ingen nye pakker.
+zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
+sha2 = "0.10"
+# zip slår av flate2 sine standardfunksjoner — da mangler komprimeringsmotoren. Samme versjon som i treet.
+flate2 = "1"
