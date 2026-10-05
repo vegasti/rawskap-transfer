@@ -2019,6 +2019,23 @@ async fn lenk_proxy_mappe(app: AppHandle, portal: String, nokkel: String, mappe_
     Ok(serde_json::json!({ "lenket": lenket, "mangler": mangler, "feilet": feilet }))
 }
 
+/// OPPLASTINGSØKT (5/10, Vegard: «jeg må passe på at denne blir ferdig før jeg sender den»): meld portalen
+/// FASITEN for en opplastingsjobb (antall + bytes + mappe), fremdrift underveis og slutten — så den vet når ALT
+/// er oppe og kan sende en ventende deling (lib/opplasting-okt.ts i portalen). Bare de tre okt-handlingene slippes
+/// gjennom; en feil her skal aldri stoppe selve opplastingen (JS ignorerer den).
+#[tauri::command]
+async fn opplasting_okt(portal: String, nokkel: String, data: serde_json::Value) -> Result<serde_json::Value, String> {
+    let handling = data["action"].as_str().unwrap_or("");
+    if !matches!(handling, "okt-start" | "okt-framdrift" | "okt-ferdig") { return Err("ukjent handling".into()); }
+    let portal = portal.trim_end_matches('/').to_string();
+    let k = klient(&nokkel)?;
+    let r = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&data).send().await.map_err(nettfeil)?;
+    let st = r.status().as_u16();
+    let d: serde_json::Value = r.json().await.unwrap_or(serde_json::json!({}));
+    if !(200..300).contains(&st) { return Err(d["error"].as_str().unwrap_or("økt-kallet feilet").to_string()); }
+    Ok(d)
+}
+
 /// DEL FRA APPEN (0.2.0): opprett en LEVENDE mappe-deling — samme API som
 /// portalen bruker (mappeRef = innholdet unioneres ved visning, ikke
 /// snapshot), og kundens egne delings-defaults hentes først så en deling
@@ -2396,7 +2413,7 @@ pub fn run() {
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
         .invoke_handler(tauri::generate_handler![avbryt_fil, les_lokal,
-            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, last_inn, hent_liste, hent_deling, deling_passord, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, ledig_plass, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn, forkast_opplasting, apne_loggmappe, lightroom_status, installer_lightroom])
+            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, opplasting_okt, last_inn, hent_liste, hent_deling, deling_passord, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, ledig_plass, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn, forkast_opplasting, apne_loggmappe, lightroom_status, installer_lightroom])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }

@@ -1458,6 +1458,18 @@
     }
     startJobbNaa(navn, filer, mappeId, erMappe, type, ekstra);
   }
+  // ── OPPLASTINGSØKT (5/10) — portalen kjenner fasiten (lib/opplasting-okt.ts). Kallene er best effort: en feil her
+  // skal aldri stoppe selve opplastingen.
+  let oktTimer = null;
+  const OKT_FERDIG = new Set(['ferdig', 'hoppet', 'endretLokalt', 'verifisert', 'hoppetNavn', 'somProxy', 'utenProxy']);
+  const oktKall = async (data) => { try { return await invoke('opplasting_okt', { portal, nokkel, data }); } catch { return null; } };
+  // Filene som faktisk lastes opp (navnekollisjoner som hoppes over er ikke med i fasiten).
+  const oktTall = (j) => {
+    const filer = j.filer.filter(f => f.hopp !== 'lik' && f.hopp !== 'navn');
+    let ferdige = 0, ferdigeBytes = 0, sendtBytes = 0;
+    for (const f of filer) { const s = filTilstand.get(f.sti); if (s && OKT_FERDIG.has(s.status)) { ferdige++; ferdigeBytes += f.bytes; } else if (s && s.status !== 'feil') sendtBytes += s.hentet || 0; }
+    return { antall: filer.length, bytes: filer.reduce((a, f) => a + (f.bytes || 0), 0), ferdige, ferdigeBytes, sendtBytes };
+  };
   function startJobbNaa(navn, filer, mappeId, erMappe, type, ekstra = {}) {
     const j = { id: 'j' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), type, navn, mappeId, filer: (type === 'opp' || type === 'inn') ? filer : filer.map(f => ({ id: f.id, filnavn: f.filnavn, bytes: f.bytes, sti: f.sti || '', xxh64: f.xxh64 || '', url: f.url || '' })), maal: erMappe && (mappeId || filer.some(f => f.url)) ? `${maal}/${navn.replace(/[\\/:*?"<>|]+/g, '_')}` : maal, status: 'kø', ok: 0, feil: [], logg: !!P.logg, konflikt: P.konflikt, ...ekstra };
     jobber.unshift(j); tegnJobber(); lagreKo(); kjørNeste();
@@ -1513,6 +1525,24 @@
         }
         for (const f of j.filer.filter(f => f.hopp)) filTilstand.set(f.sti, { id: f.sti, hentet: f.bytes, total: f.bytes, status: f.hopp === 'lik' ? 'hoppet' : 'hoppetNavn' });
         if (erstattIds.length) { try { await invoke('slett_filer', { portal, nokkel, ids: erstattIds }); } catch (e) { /* gammel blir stående — dublett-vern hindrer kaos */ } }
+      }
+      // OPPLASTINGSØKT (5/10): meld portalen fasiten før første byte, så den vet hva «alt» er («send når ferdig»,
+      // fremdrift på delingen). «Prøv igjen»/«Fortsett» gjenbruker økta — den våkner av fremdriften.
+      if (j.type === 'opp') {
+        const ot = oktTall(j);
+        if (ot.antall) {
+          if (j.oktId) await oktKall({ action: 'okt-framdrift', oktId: j.oktId, ferdige: ot.ferdige, ferdigeBytes: ot.ferdigeBytes, sendtBytes: 0 });
+          else { const d = await oktKall({ action: 'okt-start', mappeId: j.mappeId || '', antall: ot.antall, bytes: ot.bytes }); if (d && d.oktId) { j.oktId = d.oktId; lagreKo(); } }
+          if (j.oktId) {
+            clearInterval(oktTimer);
+            oktTimer = setInterval(() => {
+              if (aktiv !== j) return;
+              const t2 = oktTall(j);
+              const eta = fartModen() && fartBps > 0 ? Math.round(Math.max(0, t2.bytes - t2.ferdigeBytes - t2.sendtBytes) / fartBps) : null;
+              oktKall({ action: 'okt-framdrift', oktId: j.oktId, ferdige: t2.ferdige, ferdigeBytes: t2.ferdigeBytes, sendtBytes: t2.sendtBytes, etaSek: eta });
+            }, 15000);
+          }
+        }
       }
       const res = j.type === 'opp'
         ? await invoke('last_opp', { portal, nokkel, filer: j.filer.filter(f => !f.hopp).map(f => ({ sti: f.sti, relativ: f.relativ, bytes: f.bytes })), mappeId: j.mappeId || '', parallell: Number(P.parOpp) || 3 })
@@ -1576,6 +1606,14 @@
         }
       }
     } catch (e) { j.status = 'feil'; j.feil = [{ feil: String(e) }]; }
+    // Økta får slutten — men ikke ved pause (jobben fortsetter senere, og økta våkner da av fremdriften).
+    if (j.type === 'opp' && j.oktId) {
+      clearInterval(oktTimer); oktTimer = null;
+      if (['ferdig', 'feil', 'avbrutt'].includes(j.status)) {
+        const t2 = oktTall(j);
+        oktKall({ action: 'okt-ferdig', oktId: j.oktId, ferdige: t2.ferdige, ferdigeBytes: t2.ferdigeBytes, feil: j.status === 'feil' ? Math.max(1, j.feil.filter(f => !/^Avbrutt$/i.test(f.feil || '')).length) : 0, avbrutt: j.status === 'avbrutt' });
+      }
+    }
     lagreKo();
     if (j.synkId) { const feilet = new Set((j.feil || []).map(x => x.id)); const ok = j.filer.filter(f => !feilet.has(f.sti)); const ikke = j.filer.filter(f => feilet.has(f.sti)); if (ok.length) invoke('synk_merk', { id: j.synkId, filer: ok.map(f => ({ sti: f.sti, relativ: f.relativ, bytes: f.bytes })), ok: true }).catch(() => {}); if (ikke.length) invoke('synk_merk', { id: j.synkId, filer: ikke.map(f => ({ sti: f.sti, relativ: f.relativ, bytes: f.bytes })), ok: false }).catch(() => {}); }
     if (j.status === 'ferdig' && P.vFerdig) varsle(t.varselFerdig, `${j.navn} · ${antFiler(j.filer.length)}`);
