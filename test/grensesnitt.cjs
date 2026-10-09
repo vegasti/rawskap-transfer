@@ -128,6 +128,11 @@ window.__TAURI__ = (() => {
     await sov(900);
     sjekk('mappa viser fire filer', await ev(`document.querySelectorAll('#filer .filrad[data-id]').length`), 4);
     sjekk('og undermappa', await ev(`document.querySelectorAll('#filer .filrad.mappe').length`), 1);
+    // GiB på Windows (0.3.5): størrelsen får Utforskers tall som tooltip (65 000 000 B = 62,0 MiB), og forklaringen står i Innstillinger.
+    if (await ev(`/Windows/i.test(navigator.userAgent)`)) {
+      sjekk('størrelsen har MiB/GiB-tooltip på Windows', await ev(`/62[,.]0 MiB/.test(document.querySelector('#filer .filrad[data-id] .tall')?.title || '')`), true);
+      sjekk('forklaringen vises i Innstillinger på Windows', await ev(`!document.getElementById('gib-forklaring').hidden`), true);
+    }
 
     console.log('\n2. «N nye»');
     await sov(800);
