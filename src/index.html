@@ -1256,20 +1256,33 @@
   // gangen (les_lokal). Dra en rad inn i fil-lista, eller trykk ⤒ — begge
   // ender i droppet(), altså NØYAKTIG samme løype som slipp fra Utforsker.
   let lokSti = '';
-  const lokSkjot = (a, b) => a ? a.replace(/[/\\]$/, '') + '\\' + b : b;
-  // Opp fra en stasjonsrot (C:\, /, /Volumes/X) = stasjonslista (tom sti).
+  // Skilletegnet følger stien (0.3.6, Vegard på Mac 22/10: «Volumes/Kiwi\Korea» → «No such file or directory»):
+  // en sti med «/» i seg, eller uten stasjonsbokstav, er en Mac-sti og skjøtes med «/»; bare rene Windows-stier
+  // (C:\…) får «\». Begge funksjonene ligger på window.__rawskapLok så riggen kan teste dem.
+  const lokSep = (a) => (a.includes('/') || !/^[A-Za-z]:/.test(a)) ? '/' : '\\';
+  const lokSkjot = (a, b) => a ? a.replace(/[/\\]+$/, '') + lokSep(a) + b : b;
+  // Opp fra en stasjonsrot (C:\, /, /Volumes/X — med eller uten ledende «/») = stasjonslista (tom sti).
   const lokOpp = (a) => {
-    if (/^[A-Za-z]:[/\\]?$/.test(a) || a === '/' || /^\/Volumes\/[^/]+\/?$/.test(a)) return '';
-    const o = a.replace(/[/\\][^/\\]+[/\\]?$/, '');
+    const u = a.replace(/[/\\]+$/, '');
+    if (!u || /^[A-Za-z]:$/.test(u) || /^\/?Volumes(\/[^/\\]+)?$/.test(u)) return '';
+    const o = u.replace(/[/\\][^/\\]+$/, '');
+    if (o === '' || o === '/Volumes' || o === 'Volumes') return u.startsWith('/') && !/^\/Volumes\//.test(u) ? '/' : '';
     return /^[A-Za-z]:$/.test(o) ? o + '\\' : o;
   };
+  window.__rawskapLok = { lokSkjot, lokOpp };
   async function lokTegn() {
     const l = $('lok-liste'); l.innerHTML = '';
     $('lok-sti').textContent = lokSti || t.lokDisker;
-    let d;
-    try { d = await invoke('les_lokal', { sti: lokSti }); }
-    catch (e) { l.innerHTML = `<div class="hint" style="padding:8px">${esc(String(e))}</div>`; return; }
     const rad = (ikon, navn, str) => { const r = document.createElement('div'); r.className = 'lok-rad'; r.innerHTML = `<span>${ikon}</span><span class="navn" title="${esc(navn)}">${esc(navn)}</span>${str ? `<span class="str">${str}</span>` : ''}`; return r; };
+    let d;
+    try { d = (await invoke('les_lokal', { sti: lokSti })) || { mapper: [], filer: [] }; }
+    catch (e) {
+      // Feiler mappa (fjernet disk, feil skjøt), skal en ALLTID komme seg opp igjen (0.3.6: «Nå kommer jeg meg ikke
+      // tilbake heller») — tilbake-raden først, så feilen.
+      if (lokSti) { const opp = rad('↰', '..', ''); opp.onclick = () => { lokSti = lokOpp(lokSti); lagreLok(); lokTegn(); }; l.appendChild(opp); }
+      const feil = document.createElement('div'); feil.className = 'hint'; feil.style.padding = '8px'; feil.textContent = String(e); l.appendChild(feil);
+      return;
+    }
     const gjorDrabar = (r, sti) => {
       r.draggable = true;
       r.ondragstart = e => { e.dataTransfer.setData('text/rawskap-lokal', sti); e.dataTransfer.effectAllowed = 'copy'; };

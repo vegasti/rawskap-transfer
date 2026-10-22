@@ -46,6 +46,8 @@ window.__TAURI__ = (() => {
     if (cmd === 'mangler_lokalt') return ['a3', 'b2'];
     if (cmd === 'sjekk_versjon') return { ny: false };
     if (cmd === 'maskinnavn') return 'rigg';
+    // «Denne maskinen» (0.3.6): stasjonslista finnes, alt under den feiler — som en fjernet disk.
+    if (cmd === 'les_lokal') { if (!args || !args.sti) return { mapper: ['C:\\\\'], filer: [], rot: true }; throw 'No such file or directory (os error 2)'; }
     if (cmd === 'lightroom_status') return { lightroom: true, installert: '1.1.0', tilgjengelig: '1.2.1', sti: 'C:/rigg/Modules/rawskap.lrdevplugin' };
     if (cmd === 'installer_lightroom') return { versjon: '1.2.1', sti: 'C:/rigg/Modules/rawskap.lrdevplugin' };
     return null;
@@ -219,6 +221,30 @@ window.__TAURI__ = (() => {
       return k ? k.args.filer.map(f => f.sti) : 'ikke kalt';
     })()`);
     sjekk('forkast_opplasting får fila som ikke ble ferdig — ikke den som ble hoppet over', forkastet, ['C:/test/a.arw']);
+
+    console.log('\n7b. Lokal filleser — stiskjøt følger plattformen (0.3.6)');
+    // Vegard på Mac 22/10: «Volumes/Kiwi\Korea» → «No such file or directory», og ingen vei tilbake. Skjøten
+    // skal bruke «/» på Mac-stier (også uten ledende «/») og «\» bare på rene Windows-stier; «..» fra en
+    // stasjonsrot gir stasjonslista (tom sti).
+    const skjot = await ev(`JSON.stringify([
+      window.__rawskapLok.lokSkjot('/Volumes/Kiwi', 'Korea'), window.__rawskapLok.lokSkjot('Volumes/Kiwi/', 'Korea'),
+      window.__rawskapLok.lokSkjot('C:\\\\', 'Bilder'), window.__rawskapLok.lokSkjot('C:\\\\Bilder', 'Jobb'), window.__rawskapLok.lokSkjot('', 'C:\\\\'),
+      window.__rawskapLok.lokOpp('/Volumes/Kiwi/Korea'), window.__rawskapLok.lokOpp('/Volumes/Kiwi'), window.__rawskapLok.lokOpp('Volumes/Kiwi/'),
+      window.__rawskapLok.lokOpp('C:\\\\Bilder'), window.__rawskapLok.lokOpp('C:\\\\'), window.__rawskapLok.lokOpp('/Users/v'), window.__rawskapLok.lokOpp('/'),
+    ])`);
+    sjekk('skjøt og «..» på Mac og Windows', JSON.parse(skjot), ['/Volumes/Kiwi/Korea', 'Volumes/Kiwi/Korea', 'C:\\Bilder', 'C:\\Bilder\\Jobb', 'C:\\', '/Volumes/Kiwi', '', '', 'C:\\', '', '/Users', '']);
+    // Feiler mappa (stubben kaster for alt annet enn stasjonslista), står «..»-raden der likevel.
+    const tilbake = await ev(`(async () => {
+      document.getElementById('lok-toggle').click();
+      await new Promise(r => setTimeout(r, 300));
+      const rot = [...document.querySelectorAll('#lok-liste .lok-rad')].find(r => /^C:|^\\//.test(r.querySelector('.navn')?.textContent || ''));
+      if (!rot) return 'ingen stasjon: ' + document.getElementById('lok-liste').textContent.slice(0, 80);
+      rot.click();
+      await new Promise(r => setTimeout(r, 300));
+      const rader = [...document.querySelectorAll('#lok-liste .lok-rad .navn')].map(e => e.textContent);
+      return rader[0] === '..' && /No such file/.test(document.getElementById('lok-liste').textContent) ? 'ok' : JSON.stringify(rader);
+    })()`);
+    sjekk('«..» vises også når mappa feiler', tilbake, 'ok');
 
     console.log('\n8. Konsoll');
     const konsoll = feil.filter(f => typeof f === 'string' && /Error|error/.test(f));
