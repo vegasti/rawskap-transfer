@@ -36,5 +36,6 @@ jobs:
       - uses: actions/upload-artifact@v5
         with:
           name: Rawskap-Transfer-macOS-${{ inputs.arch }}-stapled
+          retention-days: 3   # (22/10) installerne publiseres til R2 rett etter bygget — 90 dager fylte Actions-lagringen (0,5 GB inkludert)
           path: ut/Rawskap-Transfer.dmg
           if-no-files-found: error

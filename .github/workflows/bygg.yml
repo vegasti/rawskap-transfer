@@ -79,6 +79,7 @@ jobs:
       - uses: actions/upload-artifact@v5
         with:
           name: Rawskap-Transfer-macOS-arm64
+          retention-days: 3   # (22/10) installerne publiseres til R2 rett etter bygget — 90 dager fylte Actions-lagringen (0,5 GB inkludert)
           path: |
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/macos/*.app.tar.gz
@@ -131,6 +132,7 @@ jobs:
       - uses: actions/upload-artifact@v5
         with:
           name: Rawskap-Transfer-macOS-x86_64
+          retention-days: 3   # (22/10) installerne publiseres til R2 rett etter bygget — 90 dager fylte Actions-lagringen (0,5 GB inkludert)
           path: |
             src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
             src-tauri/target/x86_64-apple-darwin/release/bundle/macos/*.app.tar.gz
@@ -181,6 +183,7 @@ jobs:
       - uses: actions/upload-artifact@v5
         with:
           name: Rawskap-Transfer-Windows-x64
+          retention-days: 3   # (22/10) installerne publiseres til R2 rett etter bygget — 90 dager fylte Actions-lagringen (0,5 GB inkludert)
           path: |
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/nsis/*.sig
