@@ -180,7 +180,7 @@ window.__TAURI__ = (() => {
     // Selvoppdateringen har alt kjørt (300 ms etter oppstart): stubben sier 1.1.0 installert, 1.2.1 ute.
     const auto = await ev(`({ kall: window.__kall.filter(k => k.cmd === 'installer_lightroom').length, varsler: (window.__varsler || []).filter(v => /Lightroom/.test(v.title)).map(v => v.title + ' | ' + v.body) })`);
     sjekk('selvoppdateringen installerte den nye versjonen', auto.kall, 1);
-    sjekk('og sa fra med et skrivebordsvarsel', auto.varsler, ['Lightroom-pluginen er oppdatert | Versjon 1.2.1 er installert — start Lightroom på nytt for å ta den i bruk.']);
+    sjekk('og sa fra med et skrivebordsvarsel', auto.varsler, ['Lightroom-pluginen er oppdatert | Versjon 1.2.1 er installert. Start Lightroom på nytt for å bruke den.']);
     const lr = await ev(`(async () => {
       document.querySelector('[data-side="lightroom"]').click();
       await new Promise(r => setTimeout(r, 200));
@@ -196,7 +196,7 @@ window.__TAURI__ = (() => {
     sjekk('statusen viser installert og ny versjon', lr.status, 'Installert: 1.1.0 · ny versjon 1.2.1');
     sjekk('knappen sier «Oppdater»', lr.knapp, 'Oppdater');
     sjekk('knappen ber Rust installere', lr.installert, true);
-    sjekk('og sier fra etterpå', lr.etter, '1.2.1 installert — start Lightroom på nytt');
+    sjekk('og sier fra etterpå', lr.etter, '1.2.1 installert. Start Lightroom på nytt.');
 
     console.log('\n6c. «Oppdater automatisk» av (0.3.3)');
     await send('Page.navigate', { url: 'file:///' + fil.replace(/\\/g, '/') + '?lrav=1' });
@@ -245,6 +245,22 @@ window.__TAURI__ = (() => {
       return rader[0] === '..' && /No such file/.test(document.getElementById('lok-liste').textContent) ? 'ok' : JSON.stringify(rader);
     })()`);
     sjekk('«..» vises også når mappa feiler', tilbake, 'ok');
+
+    // (23/10, Vegard: «satt en opplasting på pause, men viser failed/cancelled») — pause og kø er ikke feil.
+    const sammendrag = await ev(`JSON.stringify([
+      window.__rawskapOverf.overfSammendrag([{ status: 'pauset' }]),
+      window.__rawskapOverf.overfSammendrag([{ status: 'ferdig' }, { status: 'kø' }, { status: 'feil' }, { status: 'avbrutt' }]),
+      window.__rawskapOverf.overfSammendrag([]).andel,
+    ])`);
+    const [pause, blanding, tom] = JSON.parse(sammendrag);
+    sjekk('pause telles som pause, ikke feil', [pause.tekst, pause.andel], ['1 på pause', 0]);
+    sjekk('hver status for seg i sammendraget', [blanding.tekst, blanding.andel], ['1 ferdig · 1 i kø · 1 feilet · 1 avbrutt', 25]);
+    sjekk('tom liste gir tom strek', tom, 0);
+
+    // Framdrift på app-ikonet (0.3.7): verdien som går til Rust, og at ikonet skjules når ingenting går (-1).
+    const framdrift = JSON.parse(await ev(`JSON.stringify(window.__kall.filter(k => k.cmd === 'sett_framdrift').map(k => k.args.prosent))`));
+    sjekk('framdriften regnes: skjult, ubestemt, prosent', JSON.parse(await ev(`JSON.stringify([[false, 0.5], [true, null], [true, 0.4269], [true, 1.2]].map(([a, x]) => window.__rawskapOverf.framdriftVerdi(a, x)))`)), [-1, -2, 42, 100]);
+    sjekk('og skjules når ingenting går', framdrift[framdrift.length - 1], -1);
 
     console.log('\n8. Konsoll');
     const konsoll = feil.filter(f => typeof f === 'string' && /Error|error/.test(f));

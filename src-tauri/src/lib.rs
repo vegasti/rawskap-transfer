@@ -1641,6 +1641,20 @@ fn sett_tray_tekst(app: tauri::AppHandle, tekst: String) {
     }
 }
 
+// Framdrift på app-ikonet (23/10): docken på Mac, oppgavelinja på Windows. -1 = skjul, -2 = ubestemt, 0–100 = prosent.
+#[tauri::command]
+fn sett_framdrift(app: tauri::AppHandle, prosent: i64) {
+    use tauri::window::{ProgressBarState, ProgressBarStatus};
+    use tauri::Manager;
+    let Some(w) = app.get_webview_window("main") else { return };
+    let (status, progress) = match prosent {
+        -1 => (ProgressBarStatus::None, None),
+        p if p < 0 => (ProgressBarStatus::Indeterminate, None),
+        p => (ProgressBarStatus::Normal, Some(p.min(100) as u64)),
+    };
+    let _ = w.set_progress_bar(ProgressBarState { status: Some(status), progress });
+}
+
 #[tauri::command]
 async fn sjekk_versjon() -> Result<String, String> {
     let r = reqwest::Client::builder()
@@ -2413,7 +2427,7 @@ pub fn run() {
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
         .invoke_handler(tauri::generate_handler![avbryt_fil, les_lokal,
-            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, opplasting_okt, last_inn, hent_liste, hent_deling, deling_passord, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, ledig_plass, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn, forkast_opplasting, apne_loggmappe, lightroom_status, installer_lightroom])
+            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, opplasting_okt, last_inn, hent_liste, hent_deling, deling_passord, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, ledig_plass, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, sett_framdrift, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn, forkast_opplasting, apne_loggmappe, lightroom_status, installer_lightroom])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
