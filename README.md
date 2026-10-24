@@ -30,8 +30,14 @@ kutte forbindelsen, svare 500/403 eller slutte å lese — se `crates/skapflyt/s
 når craten endres. Appens egne tester står i `mod tester` i `src-tauri/src/lib.rs`.
 Loggen ligger i appens loggmappe (Innstillinger → Om → «Åpne loggmappa»).
 
+Innlesingen fra minnekort (`skapflyt::innlesing`, som rawLight også skal bruke) testes mot falske kort
+i midlertidige mapper. Feilinnsettingen `innlesing::uhell` gir full disk, en kopi som endres etter
+skriving og avbrudd midt i en fil. Ingen test rører et ekte kort.
+
 ## Lisens
 
 MIT (se `LICENSE`). ffmpeg distribueres som egen sidecar-binær under egen lisens
 (GPL/LGPL avhengig av bygget) — kildekode hos [ffmpeg.org](https://ffmpeg.org) og
 byggene vi bruker i CI hos [ffmpeg.martin-riedl.de](https://ffmpeg.martin-riedl.de).
+Innlesingen og kortregelen i `crates/skapflyt` bygger på kode fra LightCraft (MIT eller Apache-2.0),
+se `crates/skapflyt/NOTICE`.

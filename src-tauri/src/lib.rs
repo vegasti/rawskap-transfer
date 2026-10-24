@@ -19,7 +19,8 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 // Nett, opplasting, gjenopptak, nedlasting, kobling, mapper og delinger bor i craten skapflyt
 // (crates/skapflyt, S1 24/10). Her er Tauri-kommandoene, køens jobber, ffmpeg og alt lokalt.
-use skapflyt::{bare_ned, bare_opp, enkel_klient, fil_xxh64, last_ned_med_forsok, last_opp_en, mime_fra, nettfeil, pause_foer_forsok, put_proxy, resume_dir, sikre_mappe, sov, trygt_navn, urlenc, Etterarbeid, Framdrift, Melder, Stopp, Struper};
+use skapflyt::innlesing::{self, Kildefil};
+use skapflyt::{bare_ned, bare_opp, enkel_klient, last_ned_med_forsok, last_opp_en, mime_fra, nettfeil, pause_foer_forsok, put_proxy, resume_dir, sikre_mappe, sov, trygt_navn, urlenc, Etterarbeid, Framdrift, Melder, Stopp, Struper};
 pub use skapflyt::{Fil, OppFil, SjekkFil};
 
 /// Logg per jobb (valgfritt, Frame.io-stil): én fil i målmappa med start/ferdig
@@ -989,74 +990,45 @@ async fn del_mappe(portal: String, nokkel: String, mappe_id: String, navn: Strin
 /// Det er hele forskjellen på dette og en Explorer-kopi: etterpå VET du at
 /// arkivkopien er bit for bit lik kortet, og kortet kan formateres.
 /// Sletter ALDRI fra kortet — det er fotografens handling, ikke vår.
+///
+/// T4 (24/10): selve kopieringen er `skapflyt::innlesing`, den samme som rawLight skal bruke. Den
+/// overskriver aldri (to kameraer med samme DSC0001.ARW gir DSC0001-1.ARW), skriver hver kopi helt
+/// til disk, tar med kortets tid (F2) og leser kopien tilbake forbi Windows' filbuffer. `reserve` er
+/// en valgfri andre kopi. `trygt` er sann bare når hver fil er kontrollert i alle målene.
 #[tauri::command]
-async fn last_inn(app: AppHandle, tilstand: State<'_, Tilstand>, filer: Vec<OppFil>, maal: String) -> Result<serde_json::Value, String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+async fn last_inn(app: AppHandle, tilstand: State<'_, Tilstand>, filer: Vec<OppFil>, maal: String, reserve: Option<String>) -> Result<serde_json::Value, String> {
     let app = App(app);
     tilstand.avbryt.store(false, Ordering::Relaxed);
     if let Ok(mut s) = tilstand.avbrutte.lock() { s.clear(); }
-    let rot = PathBuf::from(&maal);
+    let arkiv = PathBuf::from(&maal);
+    let mut maalene = vec![arkiv.clone()];
+    if let Some(r) = reserve.filter(|r| !r.trim().is_empty()) { maalene.push(PathBuf::from(r)); }
+    // Kortet kan være tatt ut siden lista ble lest: da feiler fila i innlesingen, ikke her.
+    let kilder: Vec<Kildefil> = filer.iter().map(|f| Kildefil::fra_sti(&f.sti, f.relativ.clone())
+        .unwrap_or_else(|_| Kildefil { sti: PathBuf::from(&f.sti), relativ: f.relativ.clone(), bytes: f.bytes, endret: std::time::UNIX_EPOCH })).collect();
+    let stopp = Stopp { global: tilstand.avbryt.clone(), sett: tilstand.avbrutte.clone(), id: String::new() };
+    let rapport = tokio::task::spawn_blocking(move || innlesing::last_inn(&kilder, &innlesing::Valg::ny(maalene, UA), &app, &stopp))
+        .await.map_err(|e| format!("{e}"))??;
+    Ok(inn_svar(&rapport, &arkiv))
+}
+
+/// Svaret grensesnittet har fått siden 0.2.0 (`ok`, `feil`, `kopiert`), pluss `trygt`. `kopiert` er
+/// arkivkopiene som opplastingen etterpå leser: navnet og undermappa er kopiens, som kan ha fått
+/// `-1` når navnet var tatt.
+fn inn_svar(r: &innlesing::Rapport, arkiv: &Path) -> serde_json::Value {
     let mut ok = 0usize; let mut feil: Vec<serde_json::Value> = Vec::new(); let mut kopiert: Vec<serde_json::Value> = Vec::new();
-    for fil in &filer {
-        let stopp = Stopp { global: tilstand.avbryt.clone(), sett: tilstand.avbrutte.clone(), id: fil.sti.clone() };
-        let til = rot.join(&fil.relativ);
-        let res: Result<(), String> = async {
-            if let Some(d) = til.parent() { tokio::fs::create_dir_all(d).await.map_err(|e| format!("{e}"))?; }
-            // Finnes målet alt med samme størrelse? Verifiser i stedet for å
-            // kopiere — gjenopptak av en avbrutt innlasting skal være gratis.
-            let hopp = tokio::fs::metadata(&til).await.map(|m| m.len() == fil.bytes).unwrap_or(false);
-            let mut kilde_hash = xxhash_rust::xxh64::Xxh64::new(0);
-            if !hopp {
-                let mut f = tokio::fs::File::open(&fil.sti).await.map_err(|e| format!("{e}"))?;
-                let tmp = til.with_extension("rawskap-tmp");
-                let mut u = tokio::fs::File::create(&tmp).await.map_err(|e| format!("{e}"))?;
-                let mut buf = vec![0u8; 1 << 20];
-                let mut lest: u64 = 0;
-                let mut sist = std::time::Instant::now();
-                loop {
-                    if stopp.av() { let _ = tokio::fs::remove_file(&tmp).await; return Err("Avbrutt".into()); }
-                    let n = f.read(&mut buf).await.map_err(|e| format!("{e}"))?;
-                    if n == 0 { break; }
-                    kilde_hash.update(&buf[..n]);
-                    u.write_all(&buf[..n]).await.map_err(|e| format!("{e}"))?;
-                    lest += n as u64;
-                    if sist.elapsed().as_millis() > 150 { sist = std::time::Instant::now(); let _ = app.framdrift(Framdrift { id: fil.sti.clone(), hentet: lest, total: fil.bytes, status: "laster".into(), feil: None }); }
-                }
-                u.flush().await.map_err(|e| format!("{e}"))?;
-                drop(u);
-                tokio::fs::rename(&tmp, &til).await.map_err(|e| format!("{e}"))?;
-            } else {
-                // Hopp = les kilden likevel for hash — verifiseringen er poenget.
-                let _ = app.framdrift(Framdrift { id: fil.sti.clone(), hentet: 0, total: fil.bytes, status: "hash".into(), feil: None });
-                let h = fil_xxh64(std::path::Path::new(&fil.sti)).await?;
-                kilde_hash = xxhash_rust::xxh64::Xxh64::new(0);
-                // fil_xxh64 gir hex-streng; sammenlign strenger i stedet.
-                let _ = app.framdrift(Framdrift { id: fil.sti.clone(), hentet: fil.bytes, total: fil.bytes, status: "hash".into(), feil: None });
-                let m = fil_xxh64(&til).await?;
-                if h != m { return Err("Sjekksum ulik — arkivkopien er IKKE lik kortet".into()); }
-                let _ = app.framdrift(Framdrift { id: fil.sti.clone(), hentet: fil.bytes, total: fil.bytes, status: "verifisert".into(), feil: None });
-                return Ok(());
+    for f in &r.filer {
+        if f.kontrollert() {
+            ok += 1;
+            if let Some(sti) = f.kopier.first().and_then(|k| k.sti.as_ref()) {
+                let relativ = sti.strip_prefix(arkiv).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_else(|_| f.relativ.clone());
+                kopiert.push(serde_json::json!({ "sti": sti.to_string_lossy(), "relativ": relativ, "bytes": f.bytes, "xxh64": f.xxh64 }));
             }
-            // Les målet TILBAKE og hash — det er verifiseringen.
-            let _ = app.framdrift(Framdrift { id: fil.sti.clone(), hentet: fil.bytes, total: fil.bytes, status: "hash".into(), feil: None });
-            let m = fil_xxh64(&til).await?;
-            if format!("{:016x}", kilde_hash.digest()) != m {
-                let _ = tokio::fs::remove_file(&til).await;
-                return Err("Sjekksum ulik — kopien ble slettet, prøv igjen".into());
-            }
-            let _ = app.framdrift(Framdrift { id: fil.sti.clone(), hentet: fil.bytes, total: fil.bytes, status: "verifisert".into(), feil: None });
-            Ok(())
-        }.await;
-        match res {
-            Ok(()) => { ok += 1; kopiert.push(serde_json::json!({ "sti": til.to_string_lossy(), "relativ": fil.relativ, "bytes": fil.bytes })); }
-            Err(e) => {
-                if e != "Avbrutt" { log::warn!("innlasting feilet: {}: {e}", fil.relativ); }
-                let _ = app.framdrift(Framdrift { id: fil.sti.clone(), hentet: 0, total: fil.bytes, status: "feil".into(), feil: Some(e.clone()) });
-                feil.push(serde_json::json!({ "id": fil.sti, "feil": e }));
-            }
+        } else {
+            feil.push(serde_json::json!({ "id": f.kilde.to_string_lossy(), "feil": f.feil().unwrap_or_else(|| "Ukjent feil".into()) }));
         }
     }
-    Ok(serde_json::json!({ "ok": ok, "feil": feil, "kopiert": kopiert }))
+    serde_json::json!({ "ok": ok, "feil": feil, "kopiert": kopiert, "trygt": r.trygt_aa_formatere, "ikkeTrygt": r.ikke_trygt, "manifest": r.manifest })
 }
 
 /// LOKAL BROWSER (0.2.1, Vegard: «en lokal browser ved siden av skapet man
@@ -1355,6 +1327,38 @@ mod tester {
     fn temp_navn_er_unike() {
         let navn: std::collections::HashSet<String> = (0..10_000).map(|_| rand_suffiks()).collect();
         assert_eq!(navn.len(), 10_000);
+    }
+
+    // ── MINNEKORT (T4) ──
+    // Svaret til grensesnittet: opplastingen etterpå leser arkivkopien, så navnet og undermappa
+    // skal være kopiens (DSC0001-1.ARW når navnet var tatt), ikke kortets.
+    #[test]
+    fn innlesingens_svar_til_grensesnittet() {
+        use innlesing::{Innlest, Kopi, Rapport, Utfall};
+        let arkiv = PathBuf::from("D:/Arkiv");
+        let kopi = |sti: Option<&str>, utfall: Utfall| Kopi { maal: arkiv.clone(), sti: sti.map(|s| arkiv.join(s)), utfall, kontroll: None };
+        let fil = |kilde: &str, relativ: &str, kopier: Vec<Kopi>| Innlest { kilde: PathBuf::from(kilde), relativ: relativ.into(), bytes: 10, xxh64: Some("00000000000000aa".into()), kopier };
+        let r = Rapport {
+            filer: vec![
+                fil("F:/DCIM/100MSDCF/DSC0001.ARW", "DCIM/100MSDCF/DSC0001.ARW", vec![kopi(Some("DCIM/100MSDCF/DSC0001-1.ARW"), Utfall::Kopiert)]),
+                fil("F:/DCIM/100MSDCF/DSC0002.ARW", "DCIM/100MSDCF/DSC0002.ARW", vec![kopi(Some("DCIM/100MSDCF/DSC0002.ARW"), Utfall::Fantes)]),
+                fil("F:/DCIM/100MSDCF/DSC0003.ARW", "DCIM/100MSDCF/DSC0003.ARW", vec![kopi(None, Utfall::Avbrutt)]),
+                fil("F:/DCIM/100MSDCF/DSC0004.ARW", "DCIM/100MSDCF/DSC0004.ARW", vec![kopi(Some("DCIM/100MSDCF/DSC0004.ARW"), Utfall::Kopiert), kopi(None, Utfall::Feil("Disken er full".into()))]),
+            ],
+            manifest: vec![arkiv.join(".rawskap-innlesing/x.json")],
+            trygt_aa_formatere: false,
+            ikke_trygt: None,
+        };
+        let s = inn_svar(&r, &arkiv);
+        assert_eq!(s["ok"], 2);
+        assert_eq!(s["kopiert"][0]["relativ"], "DCIM/100MSDCF/DSC0001-1.ARW");
+        assert_eq!(s["kopiert"][0]["xxh64"], "00000000000000aa");
+        assert_eq!(s["kopiert"][1]["relativ"], "DCIM/100MSDCF/DSC0002.ARW", "Fantes er også en kontrollert arkivkopi");
+        // «Avbrutt» er signalet grensesnittet kjenner igjen (jobben blir «avbrutt», ikke rød).
+        assert_eq!(s["feil"][0], serde_json::json!({ "id": "F:/DCIM/100MSDCF/DSC0003.ARW", "feil": "Avbrutt" }));
+        assert_eq!(s["feil"][1]["feil"], "Disken er full", "en fil som mangler i reservekopien, er ikke ferdig");
+        assert_eq!(s["trygt"], false);
+        assert_eq!(inn_svar(&Rapport { trygt_aa_formatere: true, ..r }, &arkiv)["trygt"], true);
     }
 
     // ── LIGHTROOM-INSTALLASJONEN (0.3.1) ──

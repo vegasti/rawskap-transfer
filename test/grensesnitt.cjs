@@ -50,9 +50,15 @@ window.__TAURI__ = (() => {
     if (cmd === 'les_lokal') { if (!args || !args.sti) return { mapper: ['C:\\\\'], filer: [], rot: true }; throw 'No such file or directory (os error 2)'; }
     if (cmd === 'lightroom_status') return { lightroom: true, installert: '1.1.0', tilgjengelig: '1.2.1', sti: 'C:/rigg/Modules/rawskap.lrdevplugin' };
     if (cmd === 'installer_lightroom') return { versjon: '1.2.1', sti: 'C:/rigg/Modules/rawskap.lrdevplugin' };
+    // Minnekort (T4): et kort med to filer, og en innlesing som sier trygt når riggen ikke sier noe annet.
+    if (cmd === 'les_mappe') return [{ sti: 'F:/DCIM/100MSDCF/DSC0001.ARW', relativ: 'DCIM/100MSDCF/DSC0001.ARW', bytes: 25000000 }, { sti: 'F:/DCIM/100MSDCF/DSC0001.JPG', relativ: 'DCIM/100MSDCF/DSC0001.JPG', bytes: 9000000 }];
+    if (cmd === 'last_inn') return { ok: 2, feil: [], kopiert: [], trygt: window.__innTrygt !== false };
     return null;
   };
   const butikk = new Map([['kobling', { portal: 'https://rawskap.no', nokkel: 'x' }], ['maal', 'C:/ned']]);
+  window.__butikk = butikk;
+  // ?inn=1: reservekopien ble slått på i en tidligere økt (T4) — valget skal huskes.
+  if (/[?&]inn=1/.test(location.search)) butikk.set('pref', { innReserve: true, innReserveSti: 'E:\\\\Reserve' });
   // Selvoppdateringen av Lightroom-pluginen venter 15 s i appen — i riggen 300 ms.
   window.__lrAutoMs = 300;
   // ?lrav=1: brukeren har slått av «Oppdater automatisk».
@@ -64,7 +70,7 @@ window.__TAURI__ = (() => {
   return {
     core: { invoke },
     event: { listen: async () => () => {} },
-    dialog: { open: async () => null },
+    dialog: { open: async () => (window.__dialog || []).shift() ?? null },
     shell: { open: async () => {} },
     app: { getVersion: async () => '0.2.8' },
     store: { load: async () => ({ get: async k => butikk.get(k), set: async (k, v) => { butikk.set(k, v); }, save: async () => {} }) },
@@ -261,6 +267,53 @@ window.__TAURI__ = (() => {
     const framdrift = JSON.parse(await ev(`JSON.stringify(window.__kall.filter(k => k.cmd === 'sett_framdrift').map(k => k.args.prosent))`));
     sjekk('framdriften regnes: skjult, ubestemt, prosent', JSON.parse(await ev(`JSON.stringify([[false, 0.5], [true, null], [true, 0.4269], [true, 1.2]].map(([a, x]) => window.__rawskapOverf.framdriftVerdi(a, x)))`)), [-1, -2, 42, 100]);
     sjekk('og skjules når ingenting går', framdrift[framdrift.length - 1], -1);
+
+    console.log('\n7c. Minnekort: reservekopi og «trygt å formatere» (T4)');
+    await send('Page.navigate', { url: 'file:///' + fil.replace(/\\/g, '/') });
+    await sov(3000);
+    const inn = await ev(`(async () => {
+      const v = ms => new Promise(r => setTimeout(r, ms));
+      const $ = id => document.getElementById(id);
+      const sett = (on) => { const b = $('inn-reserve-bryter'); b.checked = on; b.dispatchEvent(new Event('change')); };
+      const statusTekst = () => [...document.querySelectorAll('#overf-panel .jobbrad:not(.hode)')].filter(r => r.textContent.includes('⇪')).map(r => r.querySelector('.st').textContent.trim());
+      $('vis-innlast').click(); await v(150);
+      const av = { bryter: $('inn-reserve-bryter').checked, radSkjult: $('inn-reserve-rad').classList.contains('skjult') };
+      window.__dialog = ['F:\\\\', 'D:\\\\Arkiv'];
+      $('inn-velg-kilde').click(); await v(150);
+      $('inn-velg-maal').click(); await v(150);
+      const klarUten = !$('inn-start').disabled;
+      sett(true); await v(100);
+      const sperretUtenMappe = $('inn-start').disabled;
+      window.__dialog = ['E:\\\\Reserve'];
+      $('inn-velg-reserve').click(); await v(150);
+      const klarMed = !$('inn-start').disabled;
+      const p = window.__butikk.get('pref') || {};
+      const husket = { innReserve: p.innReserve, innReserveSti: p.innReserveSti };
+      $('inn-start').click(); await v(700);
+      const k1 = window.__kall.filter(k => k.cmd === 'last_inn').pop();
+      const trygt = statusTekst()[0];
+      // Andre runde: reservekopien av, og en innlesing som IKKE er trygg.
+      $('vis-innlast').click(); await v(150);
+      sett(false); await v(100);
+      window.__innTrygt = false; window.__dialog = ['F:\\\\'];
+      $('inn-velg-kilde').click(); await v(150);
+      $('inn-start').click(); await v(700);
+      const k2 = window.__kall.filter(k => k.cmd === 'last_inn').pop();
+      return { av, klarUten, sperretUtenMappe, klarMed, husket, maal: k1 && k1.args.maal, reserve1: k1 && k1.args.reserve, reserve2: k2 && k2.args.reserve, trygt, ikkeTrygt: statusTekst()[0], antall: window.__kall.filter(k => k.cmd === 'last_inn').length };
+    })()`);
+    sjekk('reservekopien står av som standard', inn.av, { bryter: false, radSkjult: true });
+    sjekk('uten reservekopi kan innlesingen starte', inn.klarUten, true);
+    sjekk('reservekopi på uten mappe sperrer start', inn.sperretUtenMappe, true);
+    sjekk('med mappe kan den starte', inn.klarMed, true);
+    sjekk('valget huskes', inn.husket, { innReserve: true, innReserveSti: 'E:\\Reserve' });
+    sjekk('Rust får arkivet og reservekopien', [inn.maal, inn.reserve1], ['D:\\Arkiv', 'E:\\Reserve']);
+    sjekk('og ingen reservekopi når den er av', inn.reserve2, null);
+    sjekk('«trygt å formatere» vises når Rust sier trygt', /trygt å formatere|safe to format/.test(inn.trygt || ''), true);
+    sjekk('og ellers ikke', /trygt å formatere|safe to format/.test(inn.ikkeTrygt || '') || !inn.ikkeTrygt, false);
+    sjekk('to innlesinger', inn.antall, 2);
+    await send('Page.navigate', { url: 'file:///' + fil.replace(/\\/g, '/') + '?inn=1' });
+    await sov(3000);
+    sjekk('husket reservekopi vises ved oppstart', await ev(`(async () => { document.getElementById('vis-innlast').click(); await new Promise(r => setTimeout(r, 150)); return { paa: document.getElementById('inn-reserve-bryter').checked, sti: document.getElementById('inn-reserve-sti').textContent, synlig: !document.getElementById('inn-reserve-rad').classList.contains('skjult') }; })()`), { paa: true, sti: 'E:\\Reserve', synlig: true });
 
     console.log('\n8. Konsoll');
     const konsoll = feil.filter(f => typeof f === 'string' && /Error|error/.test(f));
