@@ -33,10 +33,11 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# Overføringsmotoren (S1, 24/10): nett, opplasting med gjenopptak, nedlasting, kobling, mapper og
+# delinger. Frittstående pakke i samme repo — roten er IKKE et workspace (target/ skal bli her).
+skapflyt = { path = "../crates/skapflyt" }
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
 tokio = { version = "1", features = ["full"] }
-futures-util = "0.3"
-bytes = "1"
 base64 = "0.22"
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 dirs = "6"

@@ -8,7 +8,6 @@
 // En metode som kaller seg selv, er en krasj ved første kall — aldri bare en advarsel. (0.3.0: en
 // regex-erstatning gjorde Kanal::framdrift rekursiv, og det var bare advarselen som fanget den.)
 #![deny(unconditional_recursion)]
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -18,28 +17,10 @@ use tauri_plugin_shell::ShellExt;
 use base64::Engine;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct Fil {
-    pub id: String,
-    pub filnavn: String,
-    pub bytes: u64,
-    #[serde(default)]
-    pub sti: String,
-    #[serde(default)]
-    pub xxh64: String,
-    #[serde(default)]
-    pub url: String, // deling: nedlastings-URL m/ token (302 → R2), uten innlogging
-}
-
-#[derive(Clone, Serialize)]
-struct Framdrift {
-    id: String,
-    hentet: u64,
-    total: u64,
-    status: String, // venter | laster | ferdig | feil | hoppet
-    feil: Option<String>,
-}
+// Nett, opplasting, gjenopptak, nedlasting, kobling, mapper og delinger bor i craten skapflyt
+// (crates/skapflyt, S1 24/10). Her er Tauri-kommandoene, køens jobber, ffmpeg og alt lokalt.
+use skapflyt::{bare_ned, bare_opp, enkel_klient, fil_xxh64, last_ned_med_forsok, last_opp_en, mime_fra, nettfeil, pause_foer_forsok, put_proxy, resume_dir, sikre_mappe, sov, trygt_navn, urlenc, Etterarbeid, Framdrift, Melder, Stopp, Struper};
+pub use skapflyt::{Fil, OppFil, SjekkFil};
 
 /// Logg per jobb (valgfritt, Frame.io-stil): én fil i målmappa med start/ferdig
 /// per fil + oppsummering. Størrelses-verifisert (ingen hasher lagret ennå).
@@ -75,434 +56,27 @@ pub struct Tilstand {
     opp_mbps: Arc<AtomicU64>,
 }
 
-/// «Skal denne fila stoppe?» — enten fordi HELE jobben er avbrutt, eller fordi
-/// nettopp denne fila er krysset ut. Ett spørsmål, så alle stedene som før
-/// bare kjente til jobb-avbrudd nå også lyder enkeltfila.
-#[derive(Clone)]
-struct Stopp { global: Arc<AtomicBool>, sett: Arc<std::sync::Mutex<std::collections::HashSet<String>>>, id: String }
-impl Stopp {
-    fn av(&self) -> bool {
-        self.global.load(Ordering::Relaxed)
-            || self.sett.lock().map(|s| s.contains(&self.id)).unwrap_or(false)
-    }
-}
-
-/// Struping som TOKEN-BUCKET.
-///
-/// ⚠ Den gamle regnet gjennomsnitt fra jobbstart, og det er en felle med
-/// ubegrenset minne (31/8, Vegard satte 75 Mb/s og fikk 437 kB/s): hadde jobben
-/// alt sendt 168 GB ubegrenset, ville de tatt 5 timer på 75 Mb/s — men jobben
-/// hadde kjørt én. Struperen mente den lå TIMER foran skjema og sov taket sitt
-/// på 2 s ved hver eneste bit, i praksis full stopp. Samme felle motsatt vei:
-/// en jobb som har ligget stille en stund ville fått lov til å bruse av gårde.
-///
-/// En bøtte fylles med taket som rate og RENNER OVER etter ett sekund. Da har
-/// den ingen hukommelse utover den burst-en, og å endre grensa midt i en jobb
-/// virker umiddelbart — som brukeren forventer av et felt hen nettopp skrev i.
-struct Struper { mbps: Arc<AtomicU64>, bøtte: tokio::sync::Mutex<(std::time::Instant, f64)> }
-impl Struper {
-    fn ny(mbps: Arc<AtomicU64>) -> Arc<Self> {
-        Arc::new(Self { mbps, bøtte: tokio::sync::Mutex::new((std::time::Instant::now(), 0.0)) })
-    }
-    async fn tell(&self, n: u64) {
-        let tak = self.mbps.load(Ordering::Relaxed);
-        if tak == 0 { return; }
-        let bps = tak as f64 * 1_000_000.0 / 8.0; // Mb/s → bytes/s
-        let vent = {
-            let mut b = self.bøtte.lock().await;
-            let na = std::time::Instant::now();
-            // Fyll på for tiden som gikk, men aldri mer enn ett sekunds burst.
-            b.1 = (b.1 + na.duration_since(b.0).as_secs_f64() * bps).min(bps);
-            b.0 = na;
-            b.1 -= n as f64;
-            // Negativ saldo = vi lånte; hver låner sover for sin egen andel, så
-            // parallelle overføringer deler ventetiden i stedet for å doble den.
-            if b.1 < 0.0 { -b.1 / bps } else { 0.0 }
-        };
-        if vent > 0.0 { tokio::time::sleep(std::time::Duration::from_secs_f64(vent.min(5.0))).await; }
-    }
-}
-
 #[tauri::command]
 fn sett_nettverk(tilstand: State<'_, Tilstand>, ned_mbps: u64, opp_mbps: u64) {
     tilstand.ned_mbps.store(ned_mbps, Ordering::Relaxed);
     tilstand.opp_mbps.store(opp_mbps, Ordering::Relaxed);
 }
 
-fn klient(nokkel: &str) -> Result<reqwest::Client, String> {
-    let mut h = reqwest::header::HeaderMap::new();
-    // API-nøkkel (rsk_live_…) = Bearer; app-nøkkel (signert sesjon) = cookie.
-    if nokkel.starts_with("rsk_live_") {
-        h.insert(reqwest::header::AUTHORIZATION, format!("Bearer {}", nokkel).parse().map_err(|e| format!("{e}"))?);
-    } else {
-        let cookie = format!("kunde_sesjon={}", nokkel);
-        h.insert(reqwest::header::COOKIE, cookie.parse().map_err(|e| format!("{e}"))?);
-    }
-    h.insert(reqwest::header::USER_AGENT, reqwest::header::HeaderValue::from_static(concat!("RawskapTransfer/", env!("CARGO_PKG_VERSION"))));
-    reqwest::Client::builder()
-        .default_headers(h)
-        .redirect(reqwest::redirect::Policy::none()) // vi følger 302 selv (uten cookie)
-        .connect_timeout(TILKOBLING_TAK)
-        // Portal-kall og nedlasting via portalen. Lese-taket nullstilles for hver bit av SVARET, så
-        // lange nedlastinger er trygge. Det brukes IKKE på opplastings-klienten — se bare_opp.
-        .read_timeout(PORTAL_LESE_TAK)
-        .build()
-        .map_err(nettfeil)
-}
+/// User-Agent mot portalen. Appens versjon, ikke cratens — portalloggene skal vise hvilken app som snakker.
+const UA: &str = concat!("RawskapTransfer/", env!("CARGO_PKG_VERSION"));
 
-// ── NETT SOM TÅLER VIRKELIGHETEN (0.3.0) ─────────────────────────────────────────────────────
-//
-// Før 0.3.0 hadde ingen forespørsel tidsavbrudd, og tålmodigheten ved feil var tre forsøk med 1,2 s
-// mellom. Et wifi-hopp på et halvt minutt felte fila, og en TCP-forbindelse som bare sluttet å
-// bevege seg hang for alltid — bare pause fikk den løs. Nå:
-//  - tilkobling har tak (15 s), og svar fra portalen har lese-tak;
-//  - opplastinger har en STOPP-VAKT som følger bytene, ikke klokka: en treg linje er ikke en død linje;
-//  - feil ventes ut med økende pauser (2, 4, 8, 16, 32 s), og er nettet borte, venter vi på at det
-//    kommer tilbake (inntil ti minutter) i stedet for å brenne forsøkene mens det er nede.
-
-/// Tidsenheten i millisekunder. 1000 i appen; testene skrur den ned så pausene tar millisekunder.
-static TIDSENHET_MS: AtomicU64 = AtomicU64::new(1000);
-fn enheter(n: u64) -> std::time::Duration { std::time::Duration::from_millis(n.saturating_mul(TIDSENHET_MS.load(Ordering::Relaxed))) }
-
-const TILKOBLING_TAK: std::time::Duration = std::time::Duration::from_secs(15);
-const PORTAL_LESE_TAK: std::time::Duration = std::time::Duration::from_secs(90);
-const NED_LESE_TAK: std::time::Duration = std::time::Duration::from_secs(60);
-/// Så lenge kan en opplasting stå helt stille før den kuttes og prøves igjen (tidsenheter).
-const STOPP_TAK: u64 = 60;
-/// Så lenge venter vi på at nettet kommer tilbake før et forsøk gis opp (tidsenheter).
-const NETT_VENT_TAK: u64 = 600;
-const DEL_FORSOK: u32 = 6;
-const ENKEL_FORSOK: u32 = 5;
-const PORTAL_FORSOK: u32 = 5;
-const NED_FORSOK: u32 = 6;
-
-/// Klienten for PUT rett til lageret.
-///
-/// ⚠ Bare tilkoblingstak, IKKE read_timeout. I reqwest starter den klokka når forespørselen sendes og
-/// nullstilles ikke mens kroppen går ut (lest i kilden, 0.12.28) — en 16 MB-del over en treg linje
-/// ville blitt kuttet midt i. Døde forbindelser tas av med_stoppvakt, som ser på bytene i stedet.
-fn bare_opp() -> reqwest::Client { reqwest::Client::builder().connect_timeout(TILKOBLING_TAK).build().unwrap_or_default() }
-/// Klienten for nedlasting fra lageret. Her ER lese-taket riktig: det nullstilles for hver bit som
-/// kommer, så det kutter bare en forbindelse der ingenting har kommet på et minutt — og neste
-/// forsøk fortsetter fra .part.
-fn bare_ned() -> reqwest::Client { reqwest::Client::builder().connect_timeout(TILKOBLING_TAK).read_timeout(NED_LESE_TAK).build().unwrap_or_default() }
-/// For kall uten nøkkel (kobling, delinger).
-fn enkel_klient() -> reqwest::Client { reqwest::Client::builder().connect_timeout(TILKOBLING_TAK).read_timeout(PORTAL_LESE_TAK).build().unwrap_or_default() }
-
-/// Svar som betyr «prøv igjen om litt», ikke «nei».
-fn forbigaaende(status: u16) -> bool { matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504) }
-
-/// Pause før omforsøk nr. `n` (0 = det første): 2, 4, 8, 16, 32, 32 … tidsenheter.
-fn pause_enheter(n: u32) -> u64 { 2u64 << n.min(4) }
-fn pause_foer_forsok(n: u32) -> std::time::Duration {
-    // Litt tilfeldig spredning (inntil et halvt sekund), så parallelle filer ikke slår til i takt
-    // mot en server som alt sliter.
-    let spredning = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| (d.subsec_millis() % 500) as u64).unwrap_or(0);
-    enheter(pause_enheter(n)) + std::time::Duration::from_millis(spredning * TIDSENHET_MS.load(Ordering::Relaxed) / 1000)
-}
-
-/// Sover, men våkner med én gang brukeren avbryter — en pause på 32 s mellom to forsøk skal ikke
-/// holde igjen «Pause» eller «Avbryt».
-async fn sov(d: std::time::Duration, avbryt: Option<&Stopp>) {
-    let slutt = std::time::Instant::now() + d;
-    loop {
-        if avbryt.map(|a| a.av()).unwrap_or(false) { return; }
-        let igjen = slutt.saturating_duration_since(std::time::Instant::now());
-        if igjen.is_zero() { return; }
-        tokio::time::sleep(igjen.min(std::time::Duration::from_millis(250))).await;
-    }
-}
-
-fn meld<K: Kanal>(app: &K, id: &str, hentet: u64, total: u64, status: &str) {
-    app.framdrift(Framdrift { id: id.to_string(), hentet, total, status: status.into(), feil: None });
-}
-
-/// Kjører en overføring med STOPP-VAKT. Har `fram` (bytene som er sendt) ikke flyttet seg på
-/// STOPP_TAK, kuttes den og gir `None`. Avbryter brukeren, kuttes den også — innen ett sekund, i
-/// stedet for først når delen er ferdig.
-///
-/// ⚠ Vakta ser på bytene, ikke klokka. En del over en struppet linje kan godt ta minutter; det er
-/// ikke en feil. En forbindelse der ingenting har rørt seg på et minutt, er det.
-async fn med_stoppvakt<T>(fram: &AtomicU64, avbryt: Option<&Stopp>, fut: impl std::future::Future<Output = T>) -> Option<T> {
-    tokio::pin!(fut);
-    let mut sist = fram.load(Ordering::Relaxed);
-    let mut stille_siden = std::time::Instant::now();
-    loop {
-        tokio::select! {
-            r = &mut fut => return Some(r),
-            _ = tokio::time::sleep(enheter(1)) => {
-                if avbryt.map(|a| a.av()).unwrap_or(false) { return None; }
-                let n = fram.load(Ordering::Relaxed);
-                if n != sist { sist = n; stille_siden = std::time::Instant::now(); }
-                else if stille_siden.elapsed() >= enheter(STOPP_TAK) { return None; }
-            }
-        }
-    }
-}
-
-/// Venter til portalen svarer igjen. Et hvilket som helst svar — også en feilkode — betyr at linja
-/// er oppe. Gir `false` hvis nettet ikke kom tilbake innen taket, eller brukeren avbrøt imens.
-/// `meld_venter` kalles én gang, i det vi faktisk begynner å vente, så lista kan si det.
-async fn vent_paa_nett(portal: &str, avbryt: Option<&Stopp>, meld_venter: &(dyn Fn() + Send + Sync)) -> bool {
-    let Ok(k) = reqwest::Client::builder().connect_timeout(enheter(5)).timeout(enheter(10)).build() else { return true };
-    let url = format!("{}/api/transfer/versjon", portal.trim_end_matches('/'));
-    let start = std::time::Instant::now();
-    let mut venter = false;
-    loop {
-        if avbryt.map(|a| a.av()).unwrap_or(false) { return false; }
-        if k.get(&url).send().await.is_ok() {
-            if venter { log::info!("nettet er tilbake etter {} s", start.elapsed().as_secs()); }
-            return true;
-        }
-        if !venter { venter = true; meld_venter(); log::warn!("får ikke kontakt med portalen — venter på nettet"); }
-        if start.elapsed() >= enheter(NETT_VENT_TAK) { log::warn!("nettet kom ikke tilbake på {} s — gir opp forsøket", start.elapsed().as_secs()); return false; }
-        tokio::time::sleep(enheter(5)).await;
-    }
-}
-
-/// POST mot /api/rawskap/opplasting med omforsøk.
-///
-/// Nettfeil og forbigående serverfeil (5xx, 429) prøves igjen, og er nettet borte, ventes det ut.
-/// Alle andre svar — også 4xx — er et SVAR og går rett tilbake som (status, json); det er kallerens
-/// sak å tolke dem. Før 0.3.0 ga ett hikk under signeringen av neste bolk opp hele fila.
-async fn portal_post(k: &reqwest::Client, portal: &str, body: &serde_json::Value, avbryt: Option<&Stopp>) -> Result<(u16, serde_json::Value), String> {
-    let url = format!("{portal}/api/rawskap/opplasting");
-    let handling = body["action"].as_str().unwrap_or("?");
-    let mut n = 0u32;
-    loop {
-        let feil = match k.post(&url).json(body).send().await {
-            Ok(r) => {
-                let st = r.status().as_u16();
-                // Siste forsøk: gi kalleren svaret likevel, så serverens egen feiltekst når fram.
-                if !forbigaaende(st) || n + 1 >= PORTAL_FORSOK { return Ok((st, r.json().await.unwrap_or(serde_json::Value::Null))); }
-                format!("Portalen svarte {st}")
-            }
-            Err(e) => nettfeil(e),
-        };
-        if avbryt.map(|a| a.av()).unwrap_or(false) { return Err("Avbrutt".into()); }
-        if n + 1 >= PORTAL_FORSOK { return Err(feil); }
-        log::warn!("{handling} feilet ({feil}) — prøver igjen");
-        vent_paa_nett(portal, avbryt, &|| {}).await;
-        sov(pause_foer_forsok(n), avbryt).await;
-        n += 1;
-    }
-}
-
-/// Be serveren glemme opplastinger vi gir opp: pending-raden, multiparten og et halvt objekt.
-/// Best-effort — feiekosten tar resten om dette ikke når fram.
-async fn forkast_nokler(k: &reqwest::Client, portal: &str, nokler: &[String]) {
-    if nokler.is_empty() { return; }
-    let _ = k.post(format!("{portal}/api/rawskap/opplasting")).json(&serde_json::json!({ "action": "avbryt", "originalKeys": nokler })).send().await;
-}
+fn klient(nokkel: &str) -> Result<reqwest::Client, String> { skapflyt::klient(nokkel, UA) }
 
 /// Hent mappetre + filer fra portalen.
 #[tauri::command]
 async fn hent_liste(portal: String, nokkel: String, mappe: String) -> Result<serde_json::Value, String> {
-    let k = klient(&nokkel)?;
-    let url = format!("{}/api/rawskap/transfer/liste?mappe={}", portal.trim_end_matches('/'), mappe);
-    let r = k.get(&url).send().await.map_err(nettfeil)?;
-    if r.status() == 401 || r.status() == 403 {
-        return Err("Nøkkelen er ugyldig eller utløpt — lag en ny i portalen.".into());
-    }
-    if !r.status().is_success() {
-        return Err(format!("Portalen svarte {}", r.status()));
-    }
-    r.json::<serde_json::Value>().await.map_err(nettfeil)
-}
-
-fn bare_uten_redirect() -> reqwest::Client { reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).connect_timeout(TILKOBLING_TAK).read_timeout(NED_LESE_TAK).build().unwrap_or_default() }
-
-/// Gjør en streng trygg å bruke som ETT ledd i en sti.
-///
-/// ⚠ Det holder ikke å bytte ut skilletegnene. Et navn på nøyaktig «.» eller «..» slapp gjennom før
-/// (funnet av `trygt_navn_slipper_ikke_ut_av_mappa` 17/9, første gang testen kjørte): da ble
-/// `mappe.join("..")` til FORELDREMAPPA. Stien i seg selv er filtrert lenger oppe, så dette ga i
-/// praksis en forvirrende feil og ikke en traversering — men en funksjon som heter «trygt navn» skal
-/// ikke overlate den vurderingen til kallstedet. Navn som bare er punktum, og Windows' reserverte
-/// enhetsnavn (som aldri kan opprettes som fil), får et understrek foran.
-fn trygt_navn(s: &str) -> String {
-    let rent: String = s.chars().map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c }).collect();
-    let rent = rent.trim().to_string();
-    if rent.is_empty() || rent.chars().all(|c| c == '.') { return format!("_{rent}"); }
-    let stamme = rent.split('.').next().unwrap_or("").to_ascii_uppercase();
-    const RESERVERTE: [&str; 22] = ["CON", "PRN", "AUX", "NUL",
-        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"];
-    if RESERVERTE.contains(&stamme.as_str()) { return format!("_{rent}"); }
-    rent
-}
-
-/// Last ned én fil med Range-resume. Skriver til «<navn>.part», flytter til
-/// endelig navn når alt er nede. Finnes endelig fil med riktig størrelse → hopp.
-async fn last_ned_en<K: Kanal>(
-    app: &K,
-    k: &reqwest::Client,
-    bare: &reqwest::Client,
-    portal: &str,
-    fil: &Fil,
-    rot: &Path,
-    avbryt: &Stopp,
-    struper: &Struper,
-    konflikt: &str,
-) -> Result<(), String> {
-    // SIKRING (sweep 25/8): fil.sti kommer fra server-/delingsdata — vask hver
-    // komponent (trygt_navn) og kast «..»/tomme, så en fiendtlig deling aldri
-    // kan skrive utenfor nedlastingsmappa (`..\..\Startup`-klassikeren).
-    let trygg_sti: std::path::PathBuf = fil.sti
-        .split(['/', '\\'])
-        .filter(|d| !d.is_empty() && *d != "." && *d != "..")
-        .map(trygt_navn)
-        .collect();
-    let mappe = if trygg_sti.as_os_str().is_empty() { rot.to_path_buf() } else { rot.join(trygg_sti) };
-    tokio::fs::create_dir_all(&mappe).await.map_err(|e| format!("{e}"))?;
-    let mut maal = mappe.join(trygt_navn(&fil.filnavn));
-    // Når fila finnes: 'hopp' (LA DEN VÆRE — standard), 'begge' (nytt navn «navn (2).ext»),
-    // 'overskriv' (alltid på nytt).
-    if tokio::fs::metadata(&maal).await.is_ok() {
-        match konflikt {
-            "begge" => { let (stamme, ext) = match trygt_navn(&fil.filnavn).rsplit_once('.') { Some((a, b)) => (a.to_string(), format!(".{b}")), None => (trygt_navn(&fil.filnavn), String::new()) }; let mut n = 2; loop { let k = mappe.join(format!("{stamme} ({n}){ext}")); if tokio::fs::metadata(&k).await.is_err() { maal = k; break; } n += 1; } }
-            "overskriv" => { let _ = tokio::fs::remove_file(&maal).await; }
-            _ => {}
-        }
-    }
-    let part = mappe.join(format!("{}.part", trygt_navn(&fil.filnavn)));
-
-    // ⚠ FINNES FILA MED SITT ENDELIGE NAVN, RØRER VI DEN IKKE (17/9).
-    //
-    // Før dette hoppet vi bare over når størrelsen var LIK, og lastet ned oppå når den avvek. Det
-    // ødela arbeid: en redigerer som jobber i nedlastingsmappa endrer størrelsen på fila. Lightroom
-    // skriver metadata rett inn i DNG-filer, og .xmp-sidecars til ARW endrer størrelse ved hver
-    // justering — så neste «last ned mappa» la originalen tilbake oppå hennes versjon, uten å spørre.
-    //
-    // At vi trygt kan la den være, følger av hvor gjenopptaks-tilstanden bor: en avbrutt nedlasting
-    // ligger som «navn.ext.part», ALDRI under sitt endelige navn. En fil med endelig navn og avvikende
-    // størrelse er derfor aldri en halvferdig nedlasting — den er noens endrede fil.
-    //
-    // Størrelsen brukes fortsatt, men bare til å SI hva som skjedde: lik = allerede overført,
-    // ulik = endret lokalt. «Overskriv» og «Behold begge» er uendret for den som vil ha dem.
-    // Unntak: en TOM fil er ingens arbeid. Uten dette ville en 0-byte rest (fra et annet program,
-    // eller en disk som gikk full) blitt stående som «endret lokalt» for alltid.
-    if let Ok(m) = tokio::fs::metadata(&maal).await {
-        if m.len() == 0 { let _ = tokio::fs::remove_file(&maal).await; }
-    }
-    if let Ok(m) = tokio::fs::metadata(&maal).await {
-        // Død .part ved siden av komplett fil (kø 25/8): en avbrutt runde etterlot resten — fila ER
-        // her, så resume-dataene er verdiløse.
-        let _ = tokio::fs::remove_file(&part).await;
-        let lik = fil.bytes > 0 && m.len() == fil.bytes;
-        let _ = app.framdrift(Framdrift {
-            id: fil.id.clone(), hentet: fil.bytes, total: fil.bytes,
-            status: if lik { "hoppet".into() } else { "endretLokalt".to_string() }, feil: None,
-        });
-        return Ok(());
-    }
-    let allerede = tokio::fs::metadata(&part).await.map(|m| m.len()).unwrap_or(0);
-    let hentet = Arc::new(AtomicU64::new(allerede));
-
-    // 1) portalen → 302 (signert R2-URL). Cookien følger KUN hit.
-    let url = if fil.url.is_empty() { format!("{}/api/rawskap/original/{}?last=1", portal.trim_end_matches('/'), fil.id) } else { fil.url.clone() };
-    let r = if fil.url.is_empty() { k.get(&url) } else { bare_uten_redirect().get(&url) }.send().await.map_err(nettfeil)?;
-    let r2 = match r.status().as_u16() {
-        301 | 302 | 303 | 307 | 308 => r
-            .headers()
-            .get(reqwest::header::LOCATION)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
-            .ok_or("302 uten Location")?,
-        403 => return Err("Blokkert (samtykke trukket/utløpt)".into()),
-        // ⚠ EN DELINGSFIL SOM FÅR 401 ER IKKE EN UGYLDIG APP-NØKKEL (19/9). Før fikk
-        // alle 401 samme melding, «Nøkkelen er ugyldig — lag en ny», også når fila
-        // tilhørte en passordbeskyttet deling der adgangsnøkkelen hadde gått ut —
-        // og der finnes det ingen nøkkel å «lage». DELING_LAAST er et fast signal
-        // frontenden kjenner igjen: den pauser jobben og ber om passordet i stedet
-        // for å la hver eneste fil feile. (Delingsfiler har alltid `url`; filer fra
-        // eget skap har den tom og går via app-nøkkelen.)
-        401 if !fil.url.is_empty() => return Err("DELING_LAAST".into()),
-        401 => return Err("Nøkkelen er ugyldig — lag en ny".into()),
-        s if (200..300).contains(&s) => url.clone(), // ikke R2 (Drive) → strøm fra portalen
-        s => return Err(format!("Portalen svarte {s}")),
-    };
-    // 2) R2 med Range fra der vi slapp.
-    let mut req = if r2 == url { k.get(&r2) } else { bare.get(&r2) };
-    if allerede > 0 {
-        req = req.header(reqwest::header::RANGE, format!("bytes={}-", allerede));
-    }
-    let resp = req.send().await.map_err(nettfeil)?;
-    let status = resp.status().as_u16();
-    let (append, start) = match status {
-        206 => (true, allerede),
-        200 => (false, 0u64), // serveren ignorerte Range → start på nytt
-        416 => { // alt er alt nede
-            tokio::fs::rename(&part, &maal).await.map_err(|e| format!("{e}"))?;
-            let _ = app.framdrift(Framdrift { id: fil.id.clone(), hentet: fil.bytes, total: fil.bytes, status: "ferdig".into(), feil: None });
-            return Ok(());
-        }
-        s => return Err(format!("Lageret svarte {s}")),
-    };
-    let total = if fil.bytes > 0 { fil.bytes } else { start + resp.content_length().unwrap_or(0) };
-    hentet.store(start, Ordering::Relaxed);
-    let mut f = tokio::fs::OpenOptions::new().create(true).write(true).append(append).truncate(!append).open(&part).await.map_err(|e| format!("{e}"))?;
-    let mut strom = resp.bytes_stream();
-    let mut sist_meldt = std::time::Instant::now();
-    while let Some(bit) = strom.next().await {
-        // ⚠ Flush før vi gir opp (0.3.0): tokio skriver i bakgrunnen, og et nytt forsøk som leser
-        // .part-størrelsen før siste bit har landet, ville fortsatt fra feil sted.
-        if avbryt.av() { let _ = f.flush().await; return Err("Avbrutt".into()); }
-        let bit = match bit { Ok(b) => b, Err(e) => { let _ = f.flush().await; return Err(nettfeil(e)); } };
-        f.write_all(&bit).await.map_err(|e| format!("{e}"))?;
-        struper.tell(bit.len() as u64).await;
-        let n = hentet.fetch_add(bit.len() as u64, Ordering::Relaxed) + bit.len() as u64;
-        if sist_meldt.elapsed().as_millis() > 150 {
-            sist_meldt = std::time::Instant::now();
-            let _ = app.framdrift(Framdrift { id: fil.id.clone(), hentet: n, total, status: "laster".into(), feil: None });
-        }
-    }
-    f.flush().await.map_err(|e| format!("{e}"))?;
-    drop(f);
-    let n = hentet.load(Ordering::Relaxed);
-    if fil.bytes > 0 && n != fil.bytes {
-        return Err(format!("Ufullstendig: {} av {} bytes — prøv igjen (fortsetter der den slapp)", n, fil.bytes));
-    }
-    // Verifisering (22/8): har serveren xxh64, sjekkes fila før den får endelig navn.
-    if !fil.xxh64.is_empty() {
-        let _ = app.framdrift(Framdrift { id: fil.id.clone(), hentet: n, total, status: "hash".into(), feil: None });
-        let h = fil_xxh64(&part).await.unwrap_or_default();
-        if h != fil.xxh64.to_lowercase() { let _ = tokio::fs::remove_file(&part).await; return Err("Verifisering feilet (xxHash) — lastet ned på nytt".into()); }
-    }
-    tokio::fs::rename(&part, &maal).await.map_err(|e| format!("{e}"))?;
-    let _ = app.framdrift(Framdrift { id: fil.id.clone(), hentet: n, total, status: if fil.xxh64.is_empty() { "ferdig".into() } else { "verifisert".into() }, feil: None });
-    Ok(())
-}
-
-/// Én fil, med omforsøk (0.3.0). Gjenopptak via .part gjør hvert forsøk billig, så tålmodigheten kan
-/// være stor: økende pauser, og er nettet borte, venter vi på det. Før var det tre forsøk med 0,8 s
-/// mellom — et wifi-hopp på et halvt minutt felte fila.
-///
-/// ⚠ Varige feil (låst deling, ugyldig nøkkel, blokkert fil) prøves IKKE igjen: svaret blir det samme.
-async fn last_ned_med_forsok<K: Kanal>(app: &K, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &Fil, rot: &Path, avbryt: &Stopp, struper: &Struper, konflikt: &str) -> Result<(), String> {
-    let mut n = 0u32;
-    loop {
-        let e = match last_ned_en(app, k, bare, portal, fil, rot, avbryt, struper, konflikt).await { Ok(()) => return Ok(()), Err(e) => e };
-        if avbryt.av() || varig_nedlastingsfeil(&e) || n + 1 >= NED_FORSOK {
-            if e != "Avbrutt" { log::warn!("ned feilet: {}: {e}", fil.filnavn); }
-            return Err(e);
-        }
-        log::warn!("ned {} forsøk {} feilet: {e}", fil.filnavn, n + 1);
-        let (a, id, total) = (app.clone(), fil.id.clone(), fil.bytes);
-        vent_paa_nett(portal, Some(avbryt), &move || meld(&a, &id, 0, total, "venterNett")).await;
-        meld(app, &fil.id, 0, fil.bytes, "nyttForsok");
-        sov(pause_foer_forsok(n), Some(avbryt)).await;
-        if avbryt.av() { return Err("Avbrutt".into()); }
-        n += 1;
-    }
-}
-fn varig_nedlastingsfeil(e: &str) -> bool {
-    e == "DELING_LAAST" || e.starts_with("Nøkkelen er ugyldig") || e.starts_with("Blokkert") || e.starts_with("Portalen svarte 4")
+    skapflyt::hent_liste(portal, nokkel, mappe, UA).await
 }
 
 /// Last ned et sett filer til en mappe — `parallell` samtidige strømmer.
 #[tauri::command]
 async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String, nokkel: String, filer: Vec<Fil>, maal: String, parallell: usize, logg: bool, jobbnavn: String, konflikt: String) -> Result<serde_json::Value, String> {
+    let app = App(app);
     tilstand.avbryt.store(false, Ordering::Relaxed);
     let rot0 = PathBuf::from(&maal);
     tokio::fs::create_dir_all(&rot0).await.map_err(|e| format!("{e}"))?;
@@ -569,33 +143,14 @@ fn maskinnavn() -> String {
 /// Device-kobling (webviewen kan ikke fetch-e portalen — CORS): start → kode.
 #[tauri::command]
 async fn kobling_start(portal: String, maskin: String) -> Result<serde_json::Value, String> {
-    let k = enkel_klient();
-    let r = k.post(format!("{}/api/rawskap/transfer/kobling", portal.trim_end_matches('/')))
-        .json(&serde_json::json!({ "maskin": maskin })).send().await.map_err(nettfeil)?;
-    if !r.status().is_success() { return Err(format!("Portalen svarte {}", r.status())); }
-    r.json::<serde_json::Value>().await.map_err(nettfeil)
+    skapflyt::kobling_start(portal, maskin).await
 }
 
-/// Device-kobling: poll til nøkkelen er godkjent i nettleseren.
-///
-/// ⚠ `hemmelighet` (18/9) er den lange strengen `kobling_start` fikk tilbake.
-/// De seks tegnene i koden er til å SE PÅ — de leses høyt av skjermen — mens
-/// det er hemmeligheten som beviser at det er VI som spør. Uten den var koden
-/// alene nok til å hente ut en 180-dagers sesjon fra et uinnlogget endepunkt.
-/// Tom streng = eldre portal som ennå ikke sender den; da polles som før.
+/// Device-kobling: poll til nøkkelen er godkjent i nettleseren. `hemmelighet` er den lange strengen
+/// `kobling_start` fikk tilbake — se skapflyt::kobling_poll.
 #[tauri::command]
 async fn kobling_poll(portal: String, kode: String, hemmelighet: String) -> Result<serde_json::Value, String> {
-    let k = enkel_klient();
-    let mut url = format!("{}/api/rawskap/transfer/kobling?kode={}", portal.trim_end_matches('/'), kode);
-    // Hemmeligheten er ren hex fra serveren — ingen prosentkoding trengs. Vi
-    // filtrerer likevel, så et uventet svar aldri kan sette sammen en annen URL.
-    let rent: String = hemmelighet.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-    if !rent.is_empty() {
-        url.push_str(&format!("&h={rent}"));
-    }
-    let r = k.get(url).send().await.map_err(nettfeil)?;
-    if !r.status().is_success() { return Err(format!("Portalen svarte {}", r.status())); }
-    r.json::<serde_json::Value>().await.map_err(nettfeil)
+    skapflyt::kobling_poll(portal, kode, hemmelighet).await
 }
 
 // ── VIDEO via ffmpeg-sidecar (22/8, Vegards valg): poster + scrubbe-sprite +
@@ -606,24 +161,78 @@ struct VideoInfo { bredde: u32, hoyde: u32, varighet: f64, poster: Option<String
 
 fn er_video(navn: &str) -> bool { mime_fra(navn).starts_with("video/") || navn.to_ascii_lowercase().ends_with(".mxf") }
 
-/// Det opp- og nedlastingsløypa trenger av appen: melde framdrift, og kjøre ffmpeg.
+/// Appen sett fra skapflyt: framdriften går ut som Tauri-hendelsen «framdrift», og etterarbeidet
+/// før fullfør (avspillingskopi, plakat, stripe) kjøres med ffmpeg-sidecaren.
 ///
-/// Egen trait (0.3.0) så testene kan kjøre løypa uten en ekte Tauri-app. En falsk app
-/// (tauri::test::mock_app) drar inn vindus-koden, og testprogrammet mangler manifestet den koden
-/// krever — det starter ikke engang på Windows (STATUS_ENTRYPOINT_NOT_FOUND). Å bygge manifestet
-/// inn via linkeren ville løst det, men endret hvordan appen vi SENDER UT lenkes; dette gjør ikke det.
-trait Kanal: Clone + Send + Sync + 'static {
-    fn framdrift(&self, f: Framdrift);
+/// Egen type (S1): Rust lar ikke appen implementere cratens traits for Tauris `AppHandle` — begge
+/// er fremmede for denne craten.
+#[derive(Clone)]
+struct App(AppHandle);
+
+impl Melder for App {
+    fn framdrift(&self, f: Framdrift) { let _ = self.0.emit("framdrift", f); }
+}
+
+/// Det videoløypa trenger av appen i tillegg til framdriften: å kjøre ffmpeg.
+///
+/// Egen trait (0.3.0) så løypa kan kjøres uten en ekte Tauri-app (se skapflyt::Melder for hvorfor
+/// en falsk Tauri-app ikke går). Før S1 het framdrift + ffmpeg sammen `Kanal`; framdriften er nå
+/// cratens `Melder`, og bare ffmpeg er igjen her.
+trait Kanal: Melder {
     fn ffmpeg(&self, args: &[String]) -> impl std::future::Future<Output = Result<(Vec<u8>, String), String>> + Send;
 }
-impl<R: tauri::Runtime> Kanal for AppHandle<R> {
-    fn framdrift(&self, f: Framdrift) { let _ = self.emit("framdrift", f); }
+impl Kanal for App {
     fn ffmpeg(&self, args: &[String]) -> impl std::future::Future<Output = Result<(Vec<u8>, String), String>> + Send {
-        let cmd = self.shell().sidecar("ffmpeg").map(|c| c.args(args));
+        let cmd = self.0.shell().sidecar("ffmpeg").map(|c| c.args(args));
         async move {
             let cmd = cmd.map_err(|e| format!("ffmpeg mangler: {e}"))?;
             let out = cmd.output().await.map_err(|e| format!("ffmpeg: {e}"))?;
             Ok((out.stdout, String::from_utf8_lossy(&out.stderr).to_string()))
+        }
+    }
+}
+
+/// Etterarbeidet opplastingen i skapflyt kaller før fullfør. Samme løype og rekkefølge som før
+/// uttrekket: avspillingskopien, så «ulesbar?» når det ikke ble noen, så (etter «fullfor») plakat,
+/// stripe, mål og varighet.
+impl Etterarbeid for App {
+    fn avspillingskopi(&self, bare: &reqwest::Client, portal: &str, sti: &str, navn: &str, proxy_put: &str, bytes: u64) -> impl std::future::Future<Output = Option<u64>> + Send {
+        lag_proxy_hvis_video(self, bare, portal, sti, navn, proxy_put, bytes)
+    }
+
+    /// Ingen proxy Å sende? Si HVORFOR når grunnen er at formatet ikke kan leses (ProRes RAW):
+    /// serveren dropper da Stream-forsøket, og fila meldes «utenProxy». Proben er billig.
+    fn ulesbar_video(&self, sti: &str, navn: &str) -> impl std::future::Future<Output = bool> + Send {
+        async move {
+            if !er_video(navn) { return false; }
+            let (_, e) = ffmpeg_ut(self, &["-hide_banner".into(), "-i".into(), sti.to_string()]).await.unwrap_or_default();
+            probe_ubrukelig(&e)
+        }
+    }
+
+    fn videofelt(&self, sti: &str, navn: &str, bytes: u64, body: &mut serde_json::Value) -> impl std::future::Future<Output = ()> + Send {
+        async move {
+            if er_video(navn) {
+                let _ = self.framdrift(Framdrift { id: sti.to_string(), hentet: bytes, total: bytes, status: "thumbs".into(), feil: None });
+                let mut vi = video_info(self, sti).await;
+                // Ingen plakat (ProRes RAW: strømmen kan ikke leses)? Den lokale
+                // proxyen kan. Bildene hentes derfra; MÅL og VARIGHET beholdes fra
+                // originalens container — kortet skal si 8192x4320, ikke 1024x540.
+                if vi.poster.is_none() {
+                    if let Some(lp) = finn_lokal_proxy(sti) {
+                        let vp = video_info(self, &lp).await;
+                        vi.poster = vp.poster;
+                        vi.sprite = vp.sprite;
+                        vi.frames = vp.frames;
+                        if vi.varighet <= 0.0 { vi.varighet = vp.varighet; }
+                        if vi.bredde == 0 { vi.bredde = vp.bredde; vi.hoyde = vp.hoyde; }
+                    }
+                }
+                if vi.bredde > 0 { body["bredde"] = serde_json::json!(vi.bredde); body["hoyde"] = serde_json::json!(vi.hoyde); }
+                if vi.varighet > 0.0 { body["varighet"] = serde_json::json!(vi.varighet); }
+                if let Some(p) = vi.poster { body["posterBase64"] = serde_json::json!(p); }
+                if let Some(sp) = vi.sprite { body["spriteBase64"] = serde_json::json!(sp); body["spriteFrames"] = serde_json::json!(vi.frames); }
+            }
         }
     }
 }
@@ -830,41 +439,6 @@ async fn lag_og_last_opp_proxy<K: Kanal>(app: &K, bare: &reqwest::Client, portal
     svar
 }
 
-/// Laster proxy-fila opp STRØMMET fra disk, med omforsøk (0.3.0).
-///
-/// ⚠ Før ble hele fila lest inn i minnet (1–2 GB for et langt 8K-klipp) og sendt i ÉTT forsøk. Et
-/// nett-hikk der ga et kort uten avspillingskopi — og for ProRes RAW finnes ingen annen vei til en:
-/// verken Stream eller Rawcode kan lage den. Returnerer størrelsen, eller None om den ikke kom opp.
-async fn put_proxy(bare: &reqwest::Client, portal: &str, put_url: &str, sti: &Path) -> Option<u64> {
-    let n = tokio::fs::metadata(sti).await.ok()?.len();
-    if n <= 10_000 { return None; }
-    let ingen_grense = Struper::ny(Arc::new(AtomicU64::new(0)));
-    let aldri = Stopp { global: Arc::new(AtomicBool::new(false)), sett: Arc::new(std::sync::Mutex::new(Default::default())), id: String::new() };
-    for forsok in 0..4u32 {
-        let f = tokio::fs::File::open(sti).await.ok()?;
-        let sendt = Arc::new(AtomicU64::new(0));
-        let s2 = sendt.clone();
-        let strom = fil_strom(f, ingen_grense.clone(), aldri.clone(), None, move |b| { s2.fetch_add(b, Ordering::Relaxed); });
-        let svar = med_stoppvakt(&sendt, None, bare.put(put_url).header(reqwest::header::CONTENT_TYPE, "video/mp4").header(reqwest::header::CONTENT_LENGTH, n).body(reqwest::Body::wrap_stream(strom)).send()).await;
-        let feil = match svar {
-            Some(Ok(r)) if r.status().is_success() => return Some(n),
-            Some(Ok(r)) => {
-                let s = r.status().as_u16();
-                if !forbigaaende(s) { log::warn!("proxyen ble avvist av lageret ({s})"); return None; }
-                format!("Lageret svarte {s}")
-            }
-            Some(Err(e)) => nettfeil(e),
-            None => "forbindelsen sto stille".into(),
-        };
-        log::warn!("proxy-opplasting forsøk {} feilet: {feil}", forsok + 1);
-        if forsok < 3 {
-            vent_paa_nett(portal, None, &|| {}).await;
-            sov(pause_foer_forsok(forsok), None).await;
-        }
-    }
-    None
-}
-
 /// Unikt suffiks for temp-filer.
 ///
 /// ⚠ Prosess-id alene er IKKE unikt (fikset 0.3.0): opptil seks filer lastes opp samtidig i samme
@@ -877,547 +451,11 @@ fn rand_suffiks() -> String {
     format!("{}-{ns}-{}", std::process::id(), TELLER.fetch_add(1, Ordering::Relaxed))
 }
 
-// ── MULTIPART + RESUME (22/8): filer over DEL_GRENSE går i deler (64 MB → 16 MB i 0.2.8,
-// og fra 0.3.0 vokser delen med fila — se delstorrelse).
-// Tilstand per fil ligger i en liten JSON i appens datamappe (nøkkel =
-// xxh64 av sti|størrelse|mtime) — uploadId, originalKey, ferdige deler m/
-// ETag. Starter man på nytt (nettbrudd, lukket app) fortsettes fra siste
-// ferdige del. Rådes til å ha lifecycle-regel i R2 for forlatte multiparts.
-/// ⚠ GAMMEL delstørrelse. Resume-filer uten `del_bytes` ble skrevet med denne, og MÅ leses med den.
-const DEL_BYTES_GAMMEL: u64 = 64 * 1024 * 1024;
-/// Delstørrelse for NYE opplastinger. Senket fra 64 MB (17/9): et tapt delforsøk kostet opptil
-/// 64 MB å gjenta — omtrent hele en råfil. 16 MB koster sekunder. (R2/S3 krever minst 5 MB.)
-const DEL_BYTES: u64 = 16 * 1024 * 1024;
-/// Over denne går opplastingen i deler med gjenopptak. Senket fra 96 MB (17/9): en fotograf som
-/// skyter 60-70 MB råfiler lå UNDER hele grensa, så nettopp filene som tar lang nok tid til å ryke
-/// var de eneste uten gjenopptak. 24 MB gir deling på alt som varer mer enn et øyeblikk.
-const DEL_GRENSE: u64 = 24 * 1024 * 1024;
-/// Aldri flere deler enn dette per fil (R2/S3 tar 10 000; samme margin som nettleseren).
-const MAKS_DELER: u64 = 9_000;
-
-/// Delstørrelse for en NY opplasting (0.3.0).
-///
-/// ⚠ R2/S3 tar maks 10 000 deler per fil. Med fast 16 MB-del (0.2.8) var taket derfor ~156 GiB — og
-/// et langt 8K ProRes RAW-klipp (~24 GB i minuttet) passerer det på under sju minutter. Fila ville
-/// feilet på del 10 001. Delen vokser nå med fila, så det aldri blir flere enn MAKS_DELER, rundet opp
-/// til hel MiB. Under ~140 GiB er den uendret 16 MiB.
-fn delstorrelse(bytes: u64) -> u64 {
-    const MIB: u64 = 1024 * 1024;
-    DEL_BYTES.max(bytes.div_ceil(MAKS_DELER).div_ceil(MIB) * MIB)
-}
-
-#[derive(Clone, Serialize, Deserialize, Default)]
-struct Resume { upload_id: String, original_key: String, mappe_id: String, bytes: u64, deler: Vec<(u32, String)>, #[serde(default)] proxy_put: String,
-    /// ⚠ Delstørrelsen opplastingen FAKTISK ble startet med. Må følge tilstanden, ikke leses fra
-    /// konstanten: endrer vi DEL_BYTES, ville en gjenopptatt opplasting fra forrige versjon fått
-    /// delene skrevet på feil forskyvning — korrupt fil, uten feilmelding. 0 = skrevet før dette
-    /// feltet fantes, og da var den alltid 64 MB.
-    #[serde(default)] del_bytes: u64 }
-
-fn resume_dir() -> PathBuf {
-    // Testene får sin egen mappe, så de aldri rører en ekte opplasting på maskina de kjøres på.
-    #[cfg(test)]
-    let d = std::env::temp_dir().join("rawskap-transfer-test").join("opplasting");
-    #[cfg(not(test))]
-    let d = dirs::data_local_dir().unwrap_or(std::env::temp_dir()).join("RawskapTransfer").join("opplasting");
-    let _ = std::fs::create_dir_all(&d); d
-}
-fn resume_sti(sti: &str, bytes: u64, mtime: u64) -> PathBuf {
-    let h = xxhash_rust::xxh64::xxh64(format!("{sti}|{bytes}|{mtime}").as_bytes(), 0);
-    resume_dir().join(format!("{h:016x}.json"))
-}
-fn resume_les(p: &Path) -> Option<Resume> { std::fs::read(p).ok().and_then(|b| serde_json::from_slice(&b).ok()) }
-fn resume_skriv(p: &Path, r: &Resume) { if let Ok(b) = serde_json::to_vec(r) { let tmp = p.with_extension("tmp"); if std::fs::write(&tmp, b).is_ok() { let _ = std::fs::rename(&tmp, p); } } }
-
-/// xxh64 av hele fila (1 MB-blokker). Brukes ved opplasting (lagres på raden)
-/// og ved nedlasting (verifisering mot serverens verdi).
-/// Hvor i fila del `nr` starter, og hvor lang den er.
-///
-/// ⚠ Dette er aritmetikken som ødelegger en fil hvis den er feil, og den er lett å ta feil av: en
-/// del skrevet på gal forskyvning gir en korrupt fil UTEN at noe feiler underveis. Den fikk egen
-/// funksjon 17/9 nettopp for å kunne testes — delstørrelsen ble endret samme dag, og da må man
-/// kunne bevise at delene fortsatt dekker fila nøyaktig én gang.
-fn del_omrade(nr: u32, del: u64, bytes: u64) -> (u64, u64) {
-    let start = (nr as u64 - 1) * del;
-    (start, bytes.saturating_sub(start).min(del))
-}
-
-/// Nettverksfeil UTEN URL-en.
-///
-/// ⚠ reqwest tar med hele URL-en i sin `Display`, og en presignert R2-URL ER en gyldig
-/// skrive-legitimasjon i et kvarter. Den havnet dermed rett i feilmeldinga brukeren ser, som går
-/// videre inn i skjermbilder, jobbkøen og loggfiler (Vegard 17/9: «fikk en vanvittig lang
-/// feilmelding i transfer» — med signaturen i). `without_url()` stripper den, og det som er igjen
-/// skiller fortsatt tidsavbrudd fra avvist forbindelse, som er det man faktisk trenger å vite.
-/// (0.3.0: brukt på ALLE nettkall, ikke bare to. Også portal-adresser bærer hemmeligheter — en
-/// delings-token eller en adgangsnøkkel i spørringen.)
-fn nettfeil(e: reqwest::Error) -> String {
-    let u = e.without_url();
-    if u.is_timeout() { return "Tidsavbrudd — prøv igjen".into(); }
-    if u.is_connect() { return "Fikk ikke kontakt — sjekk nettforbindelsen".into(); }
-    if u.is_body() || u.is_request() { return "Mistet forbindelsen underveis — prøv igjen".into(); }
-    if u.is_decode() { return "Uventet svar fra serveren".into(); }
-    if let Some(s) = u.status() { return format!("Serveren svarte {}", s.as_u16()); }
-    format!("Nettverksfeil: {u}")
-}
-
-async fn fil_xxh64(sti: &Path) -> Result<String, String> { fil_xxh64_meld(sti, None).await }
-
-/// xxh64 over hele fila. `meld` gir framdrift underveis (app, id, total) —
-/// STORE filer bruker flere titalls sekunder her FØR første byte er sendt, og
-/// uten melding ser appen ut som den henger på 0 kB/s (Vegard 28/8).
-async fn fil_xxh64_meld(sti: &Path, meld: Option<(&AppHandle, &str, u64)>) -> Result<String, String> {
-    use tokio::io::AsyncReadExt;
-    let mut f = tokio::fs::File::open(sti).await.map_err(|e| format!("{e}"))?;
-    let mut h = xxhash_rust::xxh64::Xxh64::new(0);
-    let mut buf = vec![0u8; 1 << 20];
-    let mut lest: u64 = 0;
-    let mut sist_meldt = std::time::Instant::now();
-    loop {
-        let n = f.read(&mut buf).await.map_err(|e| format!("{e}"))?;
-        if n == 0 { break; }
-        h.update(&buf[..n]);
-        lest += n as u64;
-        if let Some((app, id, total)) = meld {
-            if sist_meldt.elapsed().as_millis() > 200 {
-                sist_meldt = std::time::Instant::now();
-                let _ = app.framdrift(Framdrift { id: id.to_string(), hentet: lest, total, status: "hash".into(), feil: None });
-            }
-        }
-    }
-    Ok(format!("{:016x}", h.digest()))
-}
-
-/// Hvilke av disse filene finnes IKKE i nedlastingsmappa?
-///
-/// Svaret er hele grunnlaget for «N nye» og «Last ned nye» (17/9). Vegard: en redigerer som skal ha
-/// siste bunke maatte laste ned HELE mappa paa nytt. Nedlastingen hoppet riktignok over det som alt
-/// laa der, men ingenting FORTALTE henne at det fantes noe nytt, og jobben viste 500 filer for aa
-/// hente 12.
-///
-/// ⚠ «Finnes» betyr her nøyaktig det samme som i last_ned_en: ligger fila der med sitt endelige
-/// navn, er den ikke ny — uansett stoerrelse. En fil hun har redigert (DNG som Lightroom har skrevet
-/// i) skal ikke dukke opp som «ny» og friste til aa hente originalen tilbake. Tomme filer teller som
-/// fravaerende, samme unntak som der.
-#[derive(Deserialize)]
-pub struct SjekkFil { pub id: String, #[serde(default)] pub sti: String, pub filnavn: String }
-
+/// Hvilke av disse filene finnes IKKE i nedlastingsmappa? Grunnlaget for «N nye» og «Last ned nye»
+/// — reglene (endelig navn = finnes, tomme filer teller ikke) står i skapflyt::mangler_lokalt.
 #[tauri::command]
 async fn mangler_lokalt(rot: String, filer: Vec<SjekkFil>) -> Result<Vec<String>, String> {
-    let r = PathBuf::from(&rot);
-    // ⚠ FINNES IKKE MAPPA, ER ALT NYTT. Det vanligste tilfellet: mappa er aldri lastet ned. Uten
-    // denne linja spurte vi disken én gang PER FIL om noe vi allerede visste svaret på.
-    if tokio::fs::metadata(&r).await.is_err() {
-        return Ok(filer.into_iter().map(|f| f.id).collect());
-    }
-    // ⚠ ÉN KATALOGLESING PER MAPPE, ikke én stat per fil (18/9). Denne kjører hver gang en mappe
-    // åpnes, og den første varianten gjorde ett systemkall per fil: med et par tusen filer på en
-    // nettverksdisk ble det sekunder med venting før lista kom opp. Katalogen leses nå én gang og
-    // navnene slås opp i minnet. På Windows bærer read_dir-oppføringene metadataene sine fra
-    // katalogskanningen, så `metadata()` her koster ikke et nytt kall.
-    let mut kataloger: std::collections::HashMap<String, std::collections::HashSet<String>> = std::collections::HashMap::new();
-    let mut ut = Vec::new();
-    for f in filer {
-        if !kataloger.contains_key(&f.sti) {
-            let mut p = r.clone();
-            for d in f.sti.split('/').filter(|s| !s.is_empty()) { p.push(trygt_navn(d)); }
-            let mut sett = std::collections::HashSet::new();
-            if let Ok(mut kat) = tokio::fs::read_dir(&p).await {
-                while let Ok(Some(e)) = kat.next_entry().await {
-                    // Tomme filer teller som fraværende — samme unntak som i last_ned_en.
-                    let stor_nok = e.metadata().await.map(|m| m.len() > 0).unwrap_or(false);
-                    if stor_nok { sett.insert(e.file_name().to_string_lossy().to_string()); }
-                }
-            }
-            kataloger.insert(f.sti.clone(), sett);
-        }
-        let finnes = kataloger.get(&f.sti).map(|s| s.contains(&trygt_navn(&f.filnavn))).unwrap_or(false);
-        if !finnes { ut.push(f.id); }
-    }
-    Ok(ut)
-}
-
-/// Starter en fersk multipart og gir resume-tilstanden tilbake.
-/// Egen funksjon fordi den kalles to steder: ved ny opplasting, og når en
-/// gjenopptatt opplasting viser seg å være død på serveren (30/8).
-async fn multipart_start(k: &reqwest::Client, portal: &str, navn: &str, mime: &str, bytes: u64, sist: u64, mappe_id: &str, avbryt: &Stopp) -> Result<Resume, String> {
-    // Delstørrelsen settes én gang, her, og følger opplastingen til den er ferdig — både i vår egen
-    // resume-fil OG hos serveren (`delBytes` → opplastinger_pending.DelBytes). Uten den kan ikke
-    // nettleseren gjenoppta en opplasting Transfer har begynt på, fordi den ikke vet hvor delegrensene går.
-    let del = delstorrelse(bytes);
-    let (st, d) = portal_post(k, portal, &serde_json::json!({ "action": "multipart-start", "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id), "delBytes": del }), Some(avbryt)).await?;
-    if st == 401 || st == 403 { return Err("Ikke tilgang — logg inn på nytt".into()); }
-    let (uid, key) = match (d["uploadId"].as_str(), d["originalKey"].as_str()) { (Some(u), Some(kk)) => (u.to_string(), kk.to_string()), _ => return Err(d["error"].as_str().unwrap_or("multipart-start feilet").to_string()) };
-    // Serveren tilbyr en presignert URL for avspillingsproxyen (kun video).
-    // Den lagres i resume-fila så en gjenopptatt opplasting ikke mister den.
-    Ok(Resume { upload_id: uid, original_key: key, mappe_id: mappe_id.to_string(), bytes, deler: vec![], proxy_put: d["proxyPutUrl"].as_str().unwrap_or("").to_string(), del_bytes: del })
-}
-
-/// Hva lageret sier om en påbegynt opplasting.
-enum MpStatus { Deler { deler: Vec<(u32, u64, String)>, del_bytes: u64 }, Ferdig, Borte, Ukjent(String) }
-
-async fn multipart_status(k: &reqwest::Client, portal: &str, r: &Resume, avbryt: &Stopp) -> MpStatus {
-    match portal_post(k, portal, &serde_json::json!({ "action": "multipart-status", "originalKey": r.original_key, "uploadId": r.upload_id }), Some(avbryt)).await {
-        // 410 = multiparten er borte hos lageret; 404 = portalen kjenner den ikke lenger (feiekosten
-        // ryddet raden etter 72 stille timer). Begge betyr: ingenting å fortsette på.
-        Ok((410, _)) | Ok((404, _)) => MpStatus::Borte,
-        Ok((s, d)) if (200..300).contains(&s) => {
-            if d["ferdig"].as_bool().unwrap_or(false) { return MpStatus::Ferdig; }
-            let deler = d["deler"].as_array().map(|a| a.iter().filter_map(|x| Some((x["nr"].as_u64()? as u32, x["bytes"].as_u64().unwrap_or(0), x["etag"].as_str()?.trim_matches('"').to_string()))).collect()).unwrap_or_default();
-            MpStatus::Deler { deler, del_bytes: d["delBytes"].as_u64().unwrap_or(0) }
-        }
-        Ok((s, d)) => MpStatus::Ukjent(format!("{s} {}", d["error"].as_str().unwrap_or(""))),
-        Err(e) => MpStatus::Ukjent(e),
-    }
-}
-
-/// Delene lageret har, filtrert til dem vi kan stole på: gyldig nummer og NØYAKTIG den lengden delen
-/// skal ha. En del med feil lengde lastes opp på nytt — samme nummer overskriver den.
-fn gyldige_deler(fra_lager: &[(u32, u64, String)], del: u64, bytes: u64) -> Vec<(u32, String)> {
-    let antall = bytes.div_ceil(del) as u32;
-    let mut ut: Vec<(u32, String)> = fra_lager.iter()
-        .filter(|(nr, b, e)| *nr >= 1 && *nr <= antall && !e.is_empty() && *b == del_omrade(*nr, del, bytes).1)
-        .map(|(nr, _, e)| (*nr, e.clone()))
-        .collect();
-    ut.sort_by_key(|(nr, _)| *nr);
-    ut.dedup_by_key(|(nr, _)| *nr);
-    ut
-}
-
-async fn signer_deler(k: &reqwest::Client, portal: &str, r: &Resume, numre: &[u32], avbryt: &Stopp) -> Result<std::collections::HashMap<u32, String>, String> {
-    let (_, d) = portal_post(k, portal, &serde_json::json!({ "action": "multipart-deler", "originalKey": r.original_key, "uploadId": r.upload_id, "deler": numre }), Some(avbryt)).await?;
-    Ok(d["deler"].as_array().map(|a| a.iter().filter_map(|x| Some((x["nr"].as_u64()? as u32, x["url"].as_str()?.to_string()))).collect()).unwrap_or_default())
-}
-
-async fn last_opp_multipart<K: Kanal>(app: &K, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &Stopp, struper: Arc<Struper>, navn: &str, mime: &str, bytes: u64, sist: u64) -> Result<(String, u64, String, Option<String>), String> {
-    // xxh64 regnes mens delene likevel leses (17/9) — se fil_strom for hvorfor.
-    let hasher = std::sync::Mutex::new(xxhash_rust::xxh64::Xxh64::new(0));
-    let mut hel = true;
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-    let rsti = resume_sti(&fil.sti, bytes, sist);
-    let mut r = resume_les(&rsti).filter(|r| r.bytes == bytes && r.mappe_id == mappe_id).unwrap_or_default();
-    // Rundturen til portalen (multipart-start, og siden signering av deler) tar
-    // et lite oyeblikk der ingen bytes gaar. Si det, i stedet for a staa pa 0.
-    meld(app, &fil.sti, 0, bytes, "kobler");
-    // ⚠ LAGERET ER FASIT VED GJENOPPTAK (0.3.0). Før stolte vi blindt på vår egen bokføring: ble en del
-    // sendt uten at vi rakk å skrive den ned (appen døde i sekundet mellom), visste vi ikke om den, og
-    // en ødelagt resume-fil betød hele fila på nytt. Nå spør vi lageret hvilke deler som faktisk ligger
-    // der — samme spørsmål nettleseren stiller — og tar bare med deler med nøyaktig riktig lengde.
-    if !r.upload_id.is_empty() {
-        match multipart_status(k, portal, &r, avbryt).await {
-            MpStatus::Deler { deler, del_bytes } => {
-                if r.del_bytes == 0 && del_bytes > 0 { r.del_bytes = del_bytes; }
-                let del = if r.del_bytes > 0 { r.del_bytes } else { DEL_BYTES_GAMMEL };
-                let lokalt = r.deler.len();
-                r.deler = gyldige_deler(&deler, del, bytes);
-                log::info!("gjenopptar {navn}: lageret har {} ferdige deler (lokal bokføring: {lokalt})", r.deler.len());
-                resume_skriv(&rsti, &r);
-            }
-            MpStatus::Ferdig => {
-                // Satt sammen alt — appen døde mellom sammensetting og fullfør. Bare fullfør gjenstår.
-                log::info!("gjenopptar {navn}: fila er allerede satt sammen hos lageret");
-                let _ = std::fs::remove_file(&rsti);
-                return Ok((r.original_key.clone(), bytes, r.proxy_put.clone(), None));
-            }
-            MpStatus::Borte => {
-                log::warn!("{navn}: opplastingen finnes ikke lenger hos lageret — begynner på nytt");
-                r = Resume::default();
-            }
-            MpStatus::Ukjent(e) => log::warn!("{navn}: fikk ikke lest status hos lageret ({e}) — bruker lokal bokføring"),
-        }
-    }
-    if r.upload_id.is_empty() {
-        r = multipart_start(k, portal, navn, mime, bytes, sist, mappe_id, avbryt).await?;
-        resume_skriv(&rsti, &r);
-    }
-    let mut f = tokio::fs::File::open(&fil.sti).await.map_err(|e| format!("{e}"))?;
-    let mut hentet;
-    // ⚠ DØD OPPLASTING (30/8): kjenner ikke serveren opplastingen igjen, er
-    // resume-tilstanden verdiløs — og før dette var fila da PERMANENT brekt:
-    // hvert nytt forsøk leste den samme døde nøkkelen fra resume-fila og ga
-    // opp med en gang. Nå starter vi friskt i stedet. Én gang, så en server
-    // som avviser alt ikke blir en evig løkke.
-    let mut omstart_brukt = false;
-    'omstart: loop {
-    // ⚠ REGN MED OPPLASTINGENS EGEN DELSTØRRELSE, ikke konstanten. En resume-fil fra en tidligere
-    // versjon ble skrevet med 64 MB; leser vi den med dagens tall, havner delene på feil
-    // forskyvning og fila blir korrupt uten at noe sier fra. 0 = fil fra før feltet fantes.
-    // (Regnes INNE i løkka: en omstart kan gi en ny opplasting med en annen delstørrelse.)
-    let del = if r.del_bytes > 0 { r.del_bytes } else { DEL_BYTES_GAMMEL };
-    let antall = bytes.div_ceil(del) as u32;
-    let ferdige: std::collections::HashSet<u32> = r.deler.iter().map(|(n, _)| *n).collect();
-    // Finnes det alt ferdige deler, har vi IKKE lest hele fila i denne kjøringen — da er en
-    // helfils-hash umulig, og vi lar være å påstå en.
-    if !ferdige.is_empty() { hel = false; }
-    hentet = ferdige.iter().map(|n| del_omrade(*n, del, bytes).1).sum::<u64>().min(bytes);
-    meld(app, &fil.sti, hentet, bytes, "laster");
-    // Presigner deler i bolker på 20 (URL-ene lever 1 t).
-    let mangler: Vec<u32> = (1..=antall).filter(|n| !ferdige.contains(n)).collect();
-    for bolk in mangler.chunks(20) {
-        if hentet == 0 { meld(app, &fil.sti, hentet, bytes, "kobler"); }
-        let mut urler = signer_deler(k, portal, &r, bolk, avbryt).await?;
-        if urler.is_empty() {
-            if !omstart_brukt {
-                omstart_brukt = true;
-                log::warn!("{navn}: portalen kjente ikke opplastingen igjen — begynner på nytt");
-                meld(app, &fil.sti, 0, bytes, "kobler");
-                r = multipart_start(k, portal, navn, mime, bytes, sist, mappe_id, avbryt).await?;
-                resume_skriv(&rsti, &r);
-                // Ny opplasting = alle deler på nytt, så vi ser hele fila igjen. Men hasheren kan alt
-                // ha sett deler fra bolkene før — nullstill, ellers blir summen feil (fikset 0.3.0).
-                if let Ok(mut h) = hasher.lock() { *h = xxhash_rust::xxh64::Xxh64::new(0); }
-                hel = true;
-                continue 'omstart;
-            }
-            return Err("Kunne ikke signere deler — opplastingen kan være utløpt; prøv igjen".into());
-        }
-        for nr in bolk {
-            if avbryt.av() { return Err("Avbrutt".into()); }
-            let (start, len) = del_omrade(*nr, del, bytes);
-            f.seek(std::io::SeekFrom::Start(start)).await.map_err(|e| format!("{e}"))?;
-            let mut buf = vec![0u8; len as usize];
-            f.read_exact(&mut buf).await.map_err(|e| format!("{e}"))?;
-            // Hash HER, ikke i forsøks-løkka under: delen leses én gang, men kan sendes flere.
-            // Delene går i stigende rekkefølge (1..n), så dette gir samme sum som ett gjennomløp.
-            if hel { if let Ok(mut h) = hasher.lock() { h.update(&buf); } }
-            // ⚠ FRAMDRIFT UNDERVEIS (28/8, Vegard: «går fra 3.8 MB/s til 22 MB/s
-            // hele tiden»): før meldte vi først NÅR en 64 MB-del var ferdig. Ved
-            // ~10 MB/s betyr det at telleren står bom stille i ~6 sekunder og så
-            // hopper 64 MB — og en fartsmåler som sampler hvert sekund ser
-            // vekselvis 0 og 64 MB/s. Nå strømmes delen i 256 kB-biter med
-            // teller, akkurat som én-PUT-løypa, så tallet blir ekte.
-            let buf = Arc::new(buf);
-            let mut etag = None;
-            let mut siste_feil = String::new();
-            let mut ny_signatur_brukt = false;
-            let mut n = 0u32;
-            while n < DEL_FORSOK {
-                // Utløpt signatur (403) ga før opp hele fila. Nå hentes en ny for akkurat denne delen.
-                let url = match urler.get(nr) {
-                    Some(u) => u.clone(),
-                    None => match signer_deler(k, portal, &r, &[*nr], avbryt).await?.remove(nr) {
-                        Some(u) => { urler.insert(*nr, u.clone()); u }
-                        None => { siste_feil = "fikk ikke ny signatur for delen".into(); break; }
-                    },
-                };
-                let app2 = app.clone();
-                let id2 = fil.sti.clone();
-                let base = hentet;
-                let mut sist_meldt = std::time::Instant::now();
-                let sendt = Arc::new(AtomicU64::new(0));
-                let sendt2 = sendt.clone();
-                let b = buf.clone();
-                // Ved omforsøk starter delen på nytt fra `base` — ærlig, for
-                // bytene MÅ sendes om igjen.
-                // ⚠ STRUPING (31/8): bokføringen lå FØR PUT-en og meldte hele
-                // 64 MB-delen på én gang, mens Struper sover maks 2 s per kall.
-                // Taket ble dermed 64 MB / 2 s ≈ 32 MB/s uansett hva brukeren
-                // satte — altså ingen struping i praksis på store filer, som er
-                // nettopp de man vil dempe. Nå meldes hver 256 kB-bit, der
-                // søvnen er brøkdelen av et sekund og strupingen faktisk biter.
-                let str_bit = struper.clone();
-                let strom = futures_util::stream::unfold((0usize, b, str_bit), |(pos, b, s)| async move {
-                    if pos >= b.len() { return None; }
-                    let slutt = (pos + (1 << 18)).min(b.len());
-                    s.tell((slutt - pos) as u64).await;
-                    let bit = bytes::Bytes::copy_from_slice(&b[pos..slutt]);
-                    Some((Ok::<bytes::Bytes, std::io::Error>(bit), (slutt, b, s)))
-                }).inspect(move |r: &Result<bytes::Bytes, std::io::Error>| {
-                    if let Ok(bit) = r {
-                        let sendt_na = sendt2.fetch_add(bit.len() as u64, Ordering::Relaxed) + bit.len() as u64;
-                        if sist_meldt.elapsed().as_millis() > 150 {
-                            sist_meldt = std::time::Instant::now();
-                            meld(&app2, &id2, (base + sendt_na).min(bytes), bytes, "laster");
-                        }
-                    }
-                });
-                let svar = med_stoppvakt(&sendt, Some(avbryt), bare.put(&url).header(reqwest::header::CONTENT_LENGTH, len).body(reqwest::Body::wrap_stream(strom)).send()).await;
-                if avbryt.av() { return Err("Avbrutt".into()); }
-                match svar {
-                    Some(Ok(resp)) if resp.status().is_success() => {
-                        etag = resp.headers().get("etag").and_then(|v| v.to_str().ok()).map(|s| s.trim_matches('"').to_string());
-                        break;
-                    }
-                    Some(Ok(resp)) if resp.status().as_u16() == 403 && !ny_signatur_brukt => {
-                        // Signaturen har gått ut (URL-ene lever en time — en lang pause gjør det). Ny
-                        // signatur med én gang: det er ikke nettet som feiler, så ingen pause.
-                        ny_signatur_brukt = true;
-                        urler.remove(nr);
-                        siste_feil = "signaturen hadde gått ut".into();
-                        log::warn!("{navn} del {nr}: signaturen hadde gått ut — henter ny");
-                        n += 1;
-                        continue;
-                    }
-                    Some(Ok(resp)) => {
-                        let s = resp.status().as_u16();
-                        siste_feil = format!("Lageret svarte {s}");
-                        if !forbigaaende(s) { break; }
-                    }
-                    Some(Err(e)) => siste_feil = nettfeil(e),
-                    None => siste_feil = "forbindelsen sto stille — ingenting beveget seg på ett minutt".into(),
-                }
-                n += 1;
-                if n >= DEL_FORSOK { break; }
-                log::warn!("{navn} del {nr}/{antall} forsøk {n} feilet: {siste_feil}");
-                let (a, id, h) = (app.clone(), fil.sti.clone(), hentet);
-                vent_paa_nett(portal, Some(avbryt), &move || meld(&a, &id, h, bytes, "venterNett")).await;
-                meld(app, &fil.sti, hentet, bytes, "nyttForsok");
-                sov(pause_foer_forsok(n - 1), Some(avbryt)).await;
-                if avbryt.av() { return Err("Avbrutt".into()); }
-            }
-            let etag = etag.ok_or_else(|| format!("Del {nr} av {antall} feilet ({siste_feil}) — prøv igjen, den fortsetter fra del {nr}"))?;
-            r.deler.push((*nr, etag)); resume_skriv(&rsti, &r);
-            hentet = (hentet + len).min(bytes);
-            meld(app, &fil.sti, hentet, bytes, "laster");
-        }
-    }
-    break;
-    }
-    // Sett sammen. R2 bruker maalbar tid pa a lime sammen 100+ deler — det er
-    // her «star lenge pa 100 %» begynner.
-    meld(app, &fil.sti, bytes, bytes, "setter");
-    // Stigende rekkefølge: lageret krever det, og etter et gjenopptak kan bokføringen ha dem hulter til bulter.
-    r.deler.sort_by_key(|(n, _)| *n);
-    let deler: Vec<serde_json::Value> = r.deler.iter().map(|(n, e)| serde_json::json!({ "nr": n, "etag": e })).collect();
-    let (st, d) = portal_post(k, portal, &serde_json::json!({ "action": "multipart-fullfor", "originalKey": r.original_key, "uploadId": r.upload_id, "deler": deler }), Some(avbryt)).await?;
-    if !d["ok"].as_bool().unwrap_or(false) {
-        // 410 = byte-vakta hos serveren slo til (fila ble ikke hel) og har slettet den. Resume-tilstanden
-        // er da verdiløs, og neste forsøk skal begynne på nytt.
-        if st == 410 { let _ = std::fs::remove_file(&rsti); }
-        return Err(d["error"].as_str().unwrap_or("Kunne ikke sette sammen fila").to_string());
-    }
-    let _ = std::fs::remove_file(&rsti);
-    // Hashen er bare gyldig når VI har lest hver eneste del i denne kjøringen. Ble opplastingen
-    // gjenopptatt, hoppet vi over ferdige deler og har dermed ikke sett hele fila — da sendes ingen
-    // sjekksum, og nedlasting faller tilbake på størrelsessjekk (som den allerede håndterer).
-    // Å gjette her ville vært verre enn å la være: en FEIL sjekksum gjør hver senere nedlasting
-    // til en falsk verifiseringsfeil.
-    let xxh = if hel { hasher.lock().ok().map(|h| format!("{:016x}", h.digest())) } else { None };
-    Ok((r.original_key.clone(), hentet, r.proxy_put.clone(), xxh))
-}
-
-// ── OPPLASTING (22/8): samme løype som nettleseren — presign → PUT rett til
-// R2 → fullfør (serveren lager thumb/EXIF for bilder). Undermapper gjenskapes
-// i skapet (mapper-API, cache per sti). Video får ingen poster i v0.
-#[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct OppFil { pub sti: String, pub relativ: String, pub bytes: u64 }
-
-fn mime_fra(navn: &str) -> &'static str {
-    let e = navn.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-    match e.as_str() {
-        "jpg" | "jpeg" => "image/jpeg", "png" => "image/png", "webp" => "image/webp", "gif" => "image/gif", "heic" => "image/heic", "tif" | "tiff" => "image/tiff",
-        "dng" => "image/x-adobe-dng", "arw" => "image/x-sony-arw", "cr2" => "image/x-canon-cr2", "cr3" => "image/x-canon-cr3", "nef" => "image/x-nikon-nef", "raf" => "image/x-fuji-raf",
-        "mp4" => "video/mp4", "mov" => "video/quicktime", "mxf" => "application/mxf", "pdf" => "application/pdf", _ => "application/octet-stream",
-    }
-}
-
-fn mappe_json(id: &str) -> serde_json::Value { if id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(id.to_string()) } }
-
-async fn sikre_mappe(k: &reqwest::Client, portal: &str, rot: &str, relativ_dir: &str, cache: &tokio::sync::Mutex<std::collections::HashMap<String, String>>) -> Result<String, String> {
-    if relativ_dir.is_empty() { return Ok(rot.to_string()); }
-    let mut forelder = rot.to_string(); let mut sti = String::new();
-    for del in relativ_dir.split('/').filter(|d| !d.is_empty()) {
-        sti = if sti.is_empty() { del.to_string() } else { format!("{sti}/{del}") };
-        let mut c = cache.lock().await;
-        if let Some(id) = c.get(&sti) { forelder = id.clone(); continue; }
-        let r = k.post(format!("{}/api/rawskap/mapper", portal)).json(&serde_json::json!({ "navn": del, "forelderId": mappe_json(&forelder) })).send().await.map_err(nettfeil)?;
-        let d: serde_json::Value = r.json().await.map_err(nettfeil)?;
-        let id = d["id"].as_str().ok_or_else(|| format!("Kunne ikke lage mappe «{del}»: {}", d["error"].as_str().unwrap_or("?")))?.to_string();
-        c.insert(sti.clone(), id.clone()); forelder = id;
-    }
-    Ok(forelder)
-}
-
-/// Fil → byte-strøm m/ teller (PUT-framdrift).
-/// ⚠ `hash` er valgfri, og den er hele poenget med at opplasting ikke lenger tar dobbelt så lang
-/// tid. Før regnet vi xxh64 i et EGET fullt gjennomløp av fila FØR første byte ble sendt — altså
-/// leste vi 65 MB to ganger for å laste opp 65 MB, og telleren sto på null hele den første runden.
-/// Nå hashes bitene mens de likevel går ut på nett, så sjekksummen er gratis og overføringen
-/// begynner med en gang. Den er samtidig BEDRE: den er regnet over nøyaktig de bytene som faktisk
-/// ble sendt, ikke over fila slik den lå da vi begynte.
-fn fil_strom(f: tokio::fs::File, struper: Arc<Struper>, avbryt: Stopp, hash: Option<Arc<std::sync::Mutex<xxhash_rust::xxh64::Xxh64>>>, mut tell: impl FnMut(u64) + Send + 'static) -> impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
-    use tokio::io::AsyncReadExt;
-    futures_util::stream::unfold((f, struper, avbryt, hash), |(mut f, struper, avbryt, hash)| async move {
-        // Avbryt MIDT i en PUT (22/8-bug: en gjenglemt opplasting levde videre etter
-        // reload og rapporterte til samme rad som den nye) — kutt strømmen, så
-        // feiler PUT-en og opprydding (action avbryt) kjører.
-        if avbryt.av() { return Some((Err(std::io::Error::other("Avbrutt")), (f, struper, avbryt, hash))); }
-        let mut buf = vec![0u8; 1 << 20];
-        match f.read(&mut buf).await {
-            Ok(0) => None,
-            Ok(n) => {
-                buf.truncate(n);
-                if let Some(h) = &hash { if let Ok(mut h) = h.lock() { h.update(&buf); } }
-                struper.tell(n as u64).await;
-                Some((Ok(bytes::Bytes::from(buf)), (f, struper, avbryt, hash)))
-            }
-            Err(e) => Some((Err(e), (f, struper, avbryt, hash))),
-        }
-    }).inspect(move |r| { if let Ok(b) = r { tell(b.len() as u64); } })
-}
-
-async fn last_opp_en<K: Kanal>(app: &K, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, fil: &OppFil, mappe_id: &str, avbryt: &Stopp, struper: Arc<Struper>) -> Result<(), String> {
-    let navn = std::path::Path::new(&fil.sti).file_name().and_then(|n| n.to_str()).unwrap_or("fil").to_string();
-    let mime = mime_fra(&navn);
-    let meta = tokio::fs::metadata(&fil.sti).await.map_err(|e| format!("{e}"))?;
-    let bytes = meta.len();
-    let sist = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
-    // Store filer: multipart m/ resume. Små: én PUT som før.
-    if bytes > DEL_GRENSE {
-        let (key, _, proxy_put, xxh) = last_opp_multipart(app, k, bare, portal, fil, mappe_id, avbryt, struper.clone(), &navn, mime, bytes, sist).await?;
-        let proxy = lag_proxy_hvis_video(app, bare, portal, &fil.sti, &navn, &proxy_put, bytes).await;
-        return fullfor_opplasting(app, k, portal, fil, &key, &navn, mime, bytes, sist, mappe_id, xxh, proxy).await;
-    }
-    // 1) presign
-    meld(app, &fil.sti, 0, bytes, "kobler");
-    let (st, d) = portal_post(k, portal, &serde_json::json!({ "action": "presign", "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) }), Some(avbryt)).await?;
-    if st == 401 || st == 403 { return Err("Ikke tilgang — logg inn på nytt (API-nøkler kan ikke laste opp)".into()); }
-    if d["kvoteSperre"].as_bool().unwrap_or(false) { return Err(d["error"].as_str().unwrap_or("Lagringen er full").to_string()); }
-    let (url, key) = match (d["uploadUrl"].as_str(), d["originalKey"].as_str()) { (Some(u), Some(k)) => (u.to_string(), k.to_string()), _ => return Err(d["error"].as_str().unwrap_or("presign feilet").to_string()) };
-    let proxy_put = d["proxyPutUrl"].as_str().unwrap_or("").to_string();
-    // 2) PUT rett til R2 m/ framdrift — og med omforsøk (0.3.0).
-    //
-    // URL-en lever et kvarter, så et nytt forsøk trenger ingen ny signering. Hvert forsøk leser fila
-    // på nytt og får en FERSK hasher: sjekksummen skal beskrive bytene i forsøket som lyktes, ikke
-    // summen av alle forsøkene — da ville hver senere nedlasting feilet verifiseringen.
-    // Gir vi opp, ryddes nøkkelen hos serveren før vi returnerer: filforsøket i last_opp begynner da
-    // med en ny signering, og ingen halv rad blir liggende til feiekosten.
-    let mut n = 0u32;
-    let xxh = loop {
-        let hasher = Arc::new(std::sync::Mutex::new(xxhash_rust::xxh64::Xxh64::new(0)));
-        let f = tokio::fs::File::open(&fil.sti).await.map_err(|e| format!("{e}"))?;
-        let id = fil.sti.clone(); let app2 = app.clone();
-        let sendt = Arc::new(AtomicU64::new(0)); let sendt2 = sendt.clone();
-        let mut sist_meldt = std::time::Instant::now();
-        let strom = fil_strom(f, struper.clone(), avbryt.clone(), Some(hasher.clone()), move |b| {
-            let t = sendt2.fetch_add(b, Ordering::Relaxed) + b;
-            if sist_meldt.elapsed().as_millis() > 150 || t == bytes { sist_meldt = std::time::Instant::now(); meld(&app2, &id, t, bytes, "laster"); }
-        });
-        let svar = med_stoppvakt(&sendt, Some(avbryt), bare.put(&url).header(reqwest::header::CONTENT_TYPE, mime).header(reqwest::header::CONTENT_LENGTH, bytes).body(reqwest::Body::wrap_stream(strom)).send()).await;
-        if avbryt.av() {
-            forkast_nokler(k, portal, &[key.clone()]).await;
-            return Err("Avbrutt".into());
-        }
-        let (feil, gi_opp) = match svar {
-            Some(Ok(r)) if r.status().is_success() => break hasher.lock().ok().map(|h| format!("{:016x}", h.digest())),
-            // 403 = URL-en har gått ut: gi opp HER, så filforsøket henter en ny signering.
-            Some(Ok(r)) => { let s = r.status().as_u16(); (format!("Lageret svarte {s}"), !forbigaaende(s)) }
-            Some(Err(e)) => (nettfeil(e), false),
-            None => ("forbindelsen sto stille — ingenting beveget seg på ett minutt".to_string(), false),
-        };
-        if gi_opp || n + 1 >= ENKEL_FORSOK {
-            forkast_nokler(k, portal, &[key.clone()]).await;
-            return Err(feil);
-        }
-        log::warn!("opp {navn} forsøk {} feilet: {feil}", n + 1);
-        let (a, id) = (app.clone(), fil.sti.clone());
-        vent_paa_nett(portal, Some(avbryt), &move || meld(&a, &id, 0, bytes, "venterNett")).await;
-        meld(app, &fil.sti, 0, bytes, "nyttForsok");
-        sov(pause_foer_forsok(n), Some(avbryt)).await;
-        n += 1;
-    };
-    let proxy = lag_proxy_hvis_video(app, bare, portal, &fil.sti, &navn, &proxy_put, bytes).await;
-    fullfor_opplasting(app, k, portal, fil, &key, &navn, mime, bytes, sist, mappe_id, xxh, proxy).await
+    skapflyt::mangler_lokalt(rot, filer).await
 }
 
 /// Bare video, og bare når serveren faktisk tilbød en proxy-URL.
@@ -1448,76 +486,9 @@ async fn lag_proxy_hvis_video<K: Kanal>(app: &K, bare: &reqwest::Client, portal:
     lag_og_last_opp_proxy(app, bare, portal, sti, put_url, sti, total, orig_var, false).await
 }
 
-/// Fullfør-steget (server: thumb/EXIF/dedup for bilder; video: poster/sprite fra ffmpeg her).
-async fn fullfor_opplasting<K: Kanal>(app: &K, k: &reqwest::Client, portal: &str, fil: &OppFil, key: &str, navn: &str, mime: &str, bytes: u64, sist: u64, mappe_id: &str, xxh: Option<String>, proxy: Option<u64>) -> Result<(), String> {
-    let mut body = serde_json::json!({ "action": "fullfor", "originalKey": key, "filnavn": navn, "mimeType": mime, "filstorrelse": bytes, "sistEndret": sist, "mappeId": mappe_json(mappe_id) });
-    if let Some(x) = xxh { body["xxh64"] = serde_json::json!(x); }
-    // Proxyen ligger alt i lageret — si fra, så slipper serveren å be Cloudflare
-    // Stream (som feiler på ProRes) og Rawcode å laste ned originalen på nytt.
-    // Ingen proxy Å sende? Si HVORFOR når grunnen er at formatet ikke kan
-    // leses (ProRes RAW): serveren dropper da Stream-forsøket i stedet for å
-    // la Cloudflare hente titalls GB som uansett feiler. Proben er billig.
-    //
-    // ⚠ OG SI DET TIL BRUKEREN. Flagget gikk før BARE til serveren: fila ble
-    // grønn og ferdig i lista, og at den aldri får en avspillingskopi oppdaget
-    // man først dagen etter, i skapet, ved å holde musa over et lite merke —
-    // altså i en annen app, lenge etter at maskina var lukket. Beskjeden hører
-    // hjemme HER, hvor fila ligger på disken og «Lenk lokal proxy …» står i
-    // høyreklikk-menyen rett ved siden av (Vegard 11/9).
-    let mut uten_proxy = false;
-    if proxy.is_none() && er_video(navn) {
-        let (_, e) = ffmpeg_ut(app, &["-hide_banner".into(), "-i".into(), fil.sti.clone()]).await.unwrap_or_default();
-        if probe_ubrukelig(&e) { body["proxyUlesbar"] = serde_json::json!(true); uten_proxy = true; }
-    }
-    if let Some(n) = proxy {
-        // ⚠ MÅ være bit for bit lik serverens `proxyNokkel` — den avviser en
-        // nøkkel den ikke selv ville laget. Reservefallet bruker det TRIMMEDE
-        // navnet; `unwrap_or(key)` ville sneket «originals/» inn igjen.
-        let basis = key.trim_start_matches("originals/");
-        let basis = basis.rsplit_once('.').map(|(a, _)| a).unwrap_or(basis);
-        body["proxyKey"] = serde_json::json!(format!("proxy/{basis}.mp4"));
-        body["proxyStorrelse"] = serde_json::json!(n);
-    }
-    // Serveren lager thumb/EXIF/dedup her; for video kjorer ffmpeg LOKALT forst
-    // (poster + sprite). Begge deler skjer ETTER at siste byte er sendt — uten
-    // status sto appen bare stille pa 100 % (Vegard 28/8).
-    let _ = app.framdrift(Framdrift { id: fil.sti.clone(), hentet: bytes, total: bytes, status: "fullfor".into(), feil: None });
-    if er_video(navn) {
-        let _ = app.framdrift(Framdrift { id: fil.sti.clone(), hentet: bytes, total: bytes, status: "thumbs".into(), feil: None });
-        let mut vi = video_info(app, &fil.sti).await;
-        // Ingen plakat (ProRes RAW: strømmen kan ikke leses)? Den lokale
-        // proxyen kan. Bildene hentes derfra; MÅL og VARIGHET beholdes fra
-        // originalens container — kortet skal si 8192x4320, ikke 1024x540.
-        if vi.poster.is_none() {
-            if let Some(lp) = finn_lokal_proxy(&fil.sti) {
-                let vp = video_info(app, &lp).await;
-                vi.poster = vp.poster;
-                vi.sprite = vp.sprite;
-                vi.frames = vp.frames;
-                if vi.varighet <= 0.0 { vi.varighet = vp.varighet; }
-                if vi.bredde == 0 { vi.bredde = vp.bredde; vi.hoyde = vp.hoyde; }
-            }
-        }
-        if vi.bredde > 0 { body["bredde"] = serde_json::json!(vi.bredde); body["hoyde"] = serde_json::json!(vi.hoyde); }
-        if vi.varighet > 0.0 { body["varighet"] = serde_json::json!(vi.varighet); }
-        if let Some(p) = vi.poster { body["posterBase64"] = serde_json::json!(p); }
-        if let Some(sp) = vi.sprite { body["spriteBase64"] = serde_json::json!(sp); body["spriteFrames"] = serde_json::json!(vi.frames); }
-    }
-    // Med omforsøk (0.3.0): bytene ligger alt i lageret, så et nett-hikk her skal ikke koste en hel
-    // ny opplasting. Serveren er idempotent på fullfør («allerede»).
-    let (st, d) = portal_post(k, portal, &body, None).await?;
-    if !(200..300).contains(&st) { return Err(format!("fullfør: {}", d["error"].as_str().unwrap_or("feilet"))); }
-    // «utenProxy» er en FERDIG tilstand — fila ER lastet opp, og originalen er
-    // trygt i skapet. Den sier bare at det mangler noe å spille av, og hva man
-    // gjør med det. Derfor teller den som fullført alle steder i UI-et.
-    let status = if d["allerede"].as_bool().unwrap_or(false) { "hoppet" }
-        else if uten_proxy { "utenProxy" } else { "ferdig" };
-    let _ = app.framdrift(Framdrift { id: fil.sti.clone(), hentet: bytes, total: bytes, status: status.into(), feil: None });
-    Ok(())
-}
-
 #[tauri::command]
 async fn last_opp(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String, nokkel: String, filer: Vec<OppFil>, mappe_id: String, parallell: usize) -> Result<serde_json::Value, String> {
+    let app = App(app);
     tilstand.avbryt.store(false, Ordering::Relaxed);
     // DJI legger X.LRF (lavoppløst opptak) ved siden av X.MOV — det ER en
     // proxy. Ligger BEGGE i jobben, blir LRF-en avspillingskopi for MOV-en
@@ -1610,12 +581,7 @@ async fn les_mappe(sti: String) -> Result<Vec<OppFil>, String> {
 /// Ny mappe i skapet (høyreklikk / verktøylinja).
 #[tauri::command]
 async fn ny_mappe(portal: String, nokkel: String, navn: String, forelder: String) -> Result<serde_json::Value, String> {
-    let k = klient(&nokkel)?;
-    let r = k.post(format!("{}/api/rawskap/mapper", portal.trim_end_matches('/'))).json(&serde_json::json!({ "navn": navn, "forelderId": mappe_json(&forelder) })).send().await.map_err(nettfeil)?;
-    if r.status() == 401 || r.status() == 403 { return Err("Ikke tilgang — logg inn på nytt".into()); }
-    let d: serde_json::Value = r.json().await.map_err(nettfeil)?;
-    if d["id"].as_str().is_none() { return Err(d["error"].as_str().unwrap_or("Kunne ikke lage mappe").to_string()); }
-    Ok(d)
+    skapflyt::ny_mappe(portal, nokkel, navn, forelder, UA).await
 }
 
 /// Legg filer i papirkurven (brukes av «Erstatt» ved opplasting).
@@ -1881,48 +847,18 @@ async fn synk_merk(st: State<'_, SynkTilstand>, id: String, filer: Vec<OppFil>, 
     Ok(())
 }
 
-/// Deling → fil-liste (token = auth). Brukes av rawskap://deling/<token>.
-///
-/// `nokkel` er en KORTLEVD ADGANGSNØKKEL for passord-/inviterte delinger
-/// (19/9). Token-kunnskap alene holder ikke der: serveren krever at man har
-/// passert porten. Cookien som beviser det bor i nettleseren og kan ikke nå
-/// hit, så delingssiden signerer i stedet en nøkkel som gjelder i 10 minutter
-/// og legger den i deep-linken. Tom streng for åpne delinger.
+/// Deling → fil-liste (token = auth). Brukes av rawskap://deling/<token>. `nokkel` er den kortlevde
+/// adgangsnøkkelen for passord-/inviterte delinger (tom for åpne) — se skapflyt::hent_deling.
 #[tauri::command]
 async fn hent_deling(portal: String, token: String, nokkel: Option<String>) -> Result<serde_json::Value, String> {
-    let k = enkel_klient();
-    let n = nokkel.unwrap_or_default();
-    let hale = if n.is_empty() { String::new() } else { format!("&n={}", urlenc(&n)) };
-    let r = k.get(format!("{}/api/bildebank/samling/transfer-liste?token={}{}", portal.trim_end_matches('/'), token, hale)).send().await.map_err(nettfeil)?;
-    let st = r.status().as_u16();
-    let d: serde_json::Value = r.json().await.map_err(nettfeil)?;
-    // 401 = låst deling uten gyldig nøkkel. Serveren sier HVA slags lås det er,
-    // så frontenden vet om den kan spørre om passord (passord) eller må sende
-    // brukeren til nettleseren (inviterte — der finnes bare e-postlenka).
-    if st == 401 { return Err(format!("DELING_LAAST:{}", d["tilgang"].as_str().unwrap_or("passord"))); }
-    if !(200..300).contains(&st) { return Err(d["error"].as_str().unwrap_or("Kunne ikke hente delingen").to_string()); }
-    Ok(d)
+    skapflyt::hent_deling(portal, token, nokkel).await
 }
 
-/// Passord → kortlevd adgangsnøkkel for en passordbeskyttet deling (19/9).
-///
-/// Brukes når Transfer står uten nøkkel: en jobb som har ligget over sju dager,
-/// eller en vanlig /d/-lenke limt rett inn i appen. ⚠ Passordet sendes ÉN gang
-/// og lagres ingen steder — verken her eller i frontenden. Serveren har samme
-/// grense mot gjetting som nettleserens opplåsing.
+/// Passord → kortlevd adgangsnøkkel for en passordbeskyttet deling (19/9). ⚠ Passordet sendes ÉN
+/// gang og lagres ingen steder — verken her eller i frontenden.
 #[tauri::command]
 async fn deling_passord(portal: String, token: String, passord: String) -> Result<String, String> {
-    let r = enkel_klient()
-        .post(format!("{}/api/bildebank/samling/transfer-nokkel", portal.trim_end_matches('/')))
-        .json(&serde_json::json!({ "token": token, "passord": passord }))
-        .send().await.map_err(nettfeil)?;
-    let st = r.status().as_u16();
-    let d: serde_json::Value = r.json().await.unwrap_or(serde_json::Value::Null);
-    match st {
-        200..=299 => d["nokkel"].as_str().map(|s| s.to_string()).ok_or_else(|| "Serveren svarte uten nøkkel".to_string()),
-        429 => Err(d["error"].as_str().unwrap_or("For mange forsøk — vent litt").to_string()),
-        _ => Err(d["error"].as_str().unwrap_or("Feil passord").to_string()),
-    }
+    skapflyt::deling_passord(portal, token, passord).await
 }
 
 /// Semantisk søk i skapet (samme motor som nettsøket) → [{id, score}].
@@ -1936,7 +872,6 @@ async fn sok(portal: String, nokkel: String, q: String) -> Result<serde_json::Va
     if !(200..300).contains(&st) { return Err(d["error"].as_str().unwrap_or("søket feilet").to_string()); }
     Ok(d)
 }
-fn urlenc(s: &str) -> String { s.bytes().map(|b| match b { b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(), _ => format!("%{b:02X}") }).collect() }
 
 #[tauri::command]
 fn avbryt(tilstand: State<'_, Tilstand>) {
@@ -1953,11 +888,11 @@ async fn lenk_proxy(app: AppHandle, portal: String, nokkel: String, asset_id: St
     let portal = portal.trim_end_matches('/').to_string();
     let k = klient(&nokkel)?;
     let bare = bare_opp();
-    lenk_en(&app, &k, &bare, &portal, &asset_id, &sti).await?;
+    lenk_en(&App(app), &k, &bare, &portal, &asset_id, &sti).await?;
     Ok(serde_json::json!({ "ok": true }))
 }
 
-async fn lenk_en(app: &AppHandle, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, asset_id: &str, sti: &str) -> Result<(), String> {
+async fn lenk_en(app: &App, k: &reqwest::Client, bare: &reqwest::Client, portal: &str, asset_id: &str, sti: &str) -> Result<(), String> {
     let r = k.post(format!("{}/api/rawskap/opplasting", portal))
         .json(&serde_json::json!({ "action": "proxy-lenk-start", "id": asset_id })).send().await.map_err(nettfeil)?;
 
@@ -1999,6 +934,7 @@ async fn lenk_proxy_mappe(app: AppHandle, portal: String, nokkel: String, mappe_
     let portal = portal.trim_end_matches('/').to_string();
     let k = klient(&nokkel)?;
     let bare = bare_opp();
+    let app = App(app);
     let r = k.post(format!("{}/api/rawskap/opplasting", portal))
         .json(&serde_json::json!({ "action": "proxy-lenk-kandidater", "mappeId": mappe_id })).send().await.map_err(nettfeil)?;
     let d: serde_json::Value = r.json().await.map_err(nettfeil)?;
@@ -2021,7 +957,7 @@ async fn lenk_proxy_mappe(app: AppHandle, portal: String, nokkel: String, mappe_
     let mut feilet: Vec<serde_json::Value> = Vec::new();
     for (i, (id, navn)) in kandidater.iter().enumerate() {
         let stem = std::path::Path::new(navn).file_stem().and_then(|s| s.to_str()).unwrap_or(navn).to_ascii_lowercase();
-        let _ = app.emit("lenk-framdrift", serde_json::json!({ "navn": navn, "n": i + 1, "total": total }));
+        let _ = app.0.emit("lenk-framdrift", serde_json::json!({ "navn": navn, "n": i + 1, "total": total }));
         match kart.get(&stem) {
             None => { mangler += 1; }
             Some((_, sti)) => match lenk_en(&app, &k, &bare, &portal, id, sti).await {
@@ -2033,45 +969,18 @@ async fn lenk_proxy_mappe(app: AppHandle, portal: String, nokkel: String, mappe_
     Ok(serde_json::json!({ "lenket": lenket, "mangler": mangler, "feilet": feilet }))
 }
 
-/// OPPLASTINGSØKT (5/10, Vegard: «jeg må passe på at denne blir ferdig før jeg sender den»): meld portalen
-/// FASITEN for en opplastingsjobb (antall + bytes + mappe), fremdrift underveis og slutten — så den vet når ALT
-/// er oppe og kan sende en ventende deling (lib/opplasting-okt.ts i portalen). Bare de tre okt-handlingene slippes
-/// gjennom; en feil her skal aldri stoppe selve opplastingen (JS ignorerer den).
+/// OPPLASTINGSØKT (5/10): meld portalen fasiten for en opplastingsjobb, fremdrift underveis og
+/// slutten. Bare de tre okt-handlingene slippes gjennom — se skapflyt::opplasting_okt.
 #[tauri::command]
 async fn opplasting_okt(portal: String, nokkel: String, data: serde_json::Value) -> Result<serde_json::Value, String> {
-    let handling = data["action"].as_str().unwrap_or("");
-    if !matches!(handling, "okt-start" | "okt-framdrift" | "okt-ferdig") { return Err("ukjent handling".into()); }
-    let portal = portal.trim_end_matches('/').to_string();
-    let k = klient(&nokkel)?;
-    let r = k.post(format!("{}/api/rawskap/opplasting", portal)).json(&data).send().await.map_err(nettfeil)?;
-    let st = r.status().as_u16();
-    let d: serde_json::Value = r.json().await.unwrap_or(serde_json::json!({}));
-    if !(200..300).contains(&st) { return Err(d["error"].as_str().unwrap_or("økt-kallet feilet").to_string()); }
-    Ok(d)
+    skapflyt::opplasting_okt(portal, nokkel, data, UA).await
 }
 
-/// DEL FRA APPEN (0.2.0): opprett en LEVENDE mappe-deling — samme API som
-/// portalen bruker (mappeRef = innholdet unioneres ved visning, ikke
-/// snapshot), og kundens egne delings-defaults hentes først så en deling
-/// laget her ser ut som en deling laget der.
+/// DEL FRA APPEN (0.2.0): opprett en LEVENDE mappe-deling med kundens egne delings-defaults —
+/// se skapflyt::del_mappe.
 #[tauri::command]
 async fn del_mappe(portal: String, nokkel: String, mappe_id: String, navn: String) -> Result<serde_json::Value, String> {
-    let portal = portal.trim_end_matches('/').to_string();
-    let k = klient(&nokkel)?;
-    let mut body = serde_json::json!({});
-    if let Ok(r) = k.get(format!("{}/api/rawskap/deling-defaults", portal)).send().await {
-        if let Ok(d) = r.json::<serde_json::Value>().await {
-            if let Some(o) = d["defaults"].as_object() { body = serde_json::Value::Object(o.clone()); }
-        }
-    }
-    body["navn"] = serde_json::json!(navn);
-    body["mappeRef"] = serde_json::json!(mappe_id);
-    body["bildeIds"] = serde_json::json!([]);
-    let r = k.post(format!("{}/api/rawskap/del", portal)).json(&body).send().await.map_err(nettfeil)?;
-    let d: serde_json::Value = r.json().await.map_err(nettfeil)?;
-    let token = d["token"].as_str().unwrap_or("").to_string();
-    if token.is_empty() { return Err(d["error"].as_str().unwrap_or("Kunne ikke opprette deling").to_string()); }
-    Ok(serde_json::json!({ "token": token, "id": d["id"] }))
+    skapflyt::del_mappe(portal, nokkel, mappe_id, navn, UA).await
 }
 
 /// MINNEKORT-INNLASTING (0.2.0, DIT): kopier fra kort til arkiv/NAS med
@@ -2083,6 +992,7 @@ async fn del_mappe(portal: String, nokkel: String, mappe_id: String, navn: Strin
 #[tauri::command]
 async fn last_inn(app: AppHandle, tilstand: State<'_, Tilstand>, filer: Vec<OppFil>, maal: String) -> Result<serde_json::Value, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let app = App(app);
     tilstand.avbryt.store(false, Ordering::Relaxed);
     if let Ok(mut s) = tilstand.avbrutte.lock() { s.clear(); }
     let rot = PathBuf::from(&maal);
@@ -2312,40 +1222,11 @@ async fn installer_lightroom_til(portal: &str, moduler: &Path) -> Result<serde_j
     Ok(serde_json::json!({ "versjon": versjon, "sti": sti.to_string_lossy() }))
 }
 
-/// «Fjern» på en opplasting som ikke ble ferdig (0.3.0): rydd opp etter den med én gang.
-///
-/// Før ble bare raden i køen fjernet. Resume-fila, den åpne multiparten hos lageret og raden i
-/// portalens venteliste ble liggende til feiekosten tok dem — tidligst etter 72 stille timer, og
-/// multiparten tar plass hos lageret hele tiden. Nå får serveren beskjed (samme «avbryt» som
-/// nettleseren bruker), og resume-fila slettes når serveren har svart.
-///
-/// ⚠ Pause og «Avbryt» skal IKKE kalle dette — der er resume-tilstanden selve poenget.
+/// «Fjern» på en opplasting som ikke ble ferdig (0.3.0): serveren får beskjed, og resume-fila
+/// slettes. ⚠ Pause og «Avbryt» skal IKKE kalle dette — se skapflyt::forkast_opplasting.
 #[tauri::command]
 async fn forkast_opplasting(portal: String, nokkel: String, filer: Vec<OppFil>) -> Result<u32, String> {
-    let mut nokler = Vec::new();
-    let mut stier = Vec::new();
-    for f in &filer {
-        // Samme nøkkel som last_opp_en: sti + størrelse + endret-tid (ms). Finnes ikke fila lenger,
-        // finner vi heller ikke resume-fila — da tar feiekosten den, som før.
-        let Ok(m) = tokio::fs::metadata(&f.sti).await else { continue };
-        let sist = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
-        let rsti = resume_sti(&f.sti, m.len(), sist);
-        if let Some(r) = resume_les(&rsti) {
-            if !r.original_key.is_empty() { nokler.push(r.original_key); }
-            stier.push(rsti);
-        }
-    }
-    if !nokler.is_empty() {
-        let k = klient(&nokkel)?;
-        let portal = portal.trim_end_matches('/');
-        for bolk in nokler.chunks(500) {
-            let r = k.post(format!("{portal}/api/rawskap/opplasting")).json(&serde_json::json!({ "action": "avbryt", "originalKeys": bolk })).send().await.map_err(nettfeil)?;
-            if !r.status().is_success() { return Err(format!("Portalen svarte {}", r.status().as_u16())); }
-        }
-        log::info!("forkastet {} påbegynte opplastinger", nokler.len());
-    }
-    for s in &stier { let _ = std::fs::remove_file(s); }
-    Ok(nokler.len() as u32)
+    skapflyt::forkast_opplasting(portal, nokkel, filer, UA).await
 }
 
 /// Om → «Åpne loggmappa» (0.3.0).
@@ -2420,6 +1301,7 @@ pub fn run() {
             .target(tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: Some("transfer".into()) }))
             .level(log::LevelFilter::Warn)
             .level_for("app_lib", log::LevelFilter::Info)
+            .level_for("skapflyt", log::LevelFilter::Info)
             .max_file_size(5_000_000)
             .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(3))
             .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
@@ -2436,6 +1318,7 @@ pub fn run() {
 // TESTER (17/9). Repoet hadde ingen. Fire feil ble funnet på én ettermiddag, og tre av dem satt i
 // logikk som så åpenbart riktig ut ved lesing — så dekningen starter på det som faktisk ØDELEGGER
 // DATA hvis det er galt, ikke på det som er lett å teste.
+// (S1: nett-, opplastings- og nedlastingstestene ligger i crates/skapflyt/src/tester.rs, sammen med koden.)
 //   cargo test
 #[cfg(test)]
 mod tester {
@@ -2468,457 +1351,10 @@ mod tester {
         assert!(ledig_plass(String::new()).is_err());
     }
 
-    /// Delene skal dekke fila NØYAKTIG én gang: ingen hull, ingen overlapp, siste del kortere.
-    /// Kjøres for flere delstørrelser fordi tallet ble endret 17/9 (64 → 16 MB) mens gamle,
-    /// gjenopptatte opplastinger fortsatt leses med SIN egen — begge må stemme.
-    #[test]
-    fn deler_dekker_fila_uten_hull_eller_overlapp() {
-        for del in [5u64 << 20, 8 << 20, 16 << 20, 64 << 20] {
-            for bytes in [1u64, 100, del - 1, del, del + 1, 3 * del, 3 * del + 7, 65_000_000] {
-                let antall = ((bytes + del - 1) / del) as u32;
-                let mut dekket = 0u64;
-                let mut forrige_slutt = 0u64;
-                for nr in 1..=antall {
-                    let (start, len) = del_omrade(nr, del, bytes);
-                    assert_eq!(start, forrige_slutt, "hull eller overlapp ved del {nr} (del={del}, bytes={bytes})");
-                    assert!(len > 0, "tom del {nr} (del={del}, bytes={bytes})");
-                    assert!(len <= del, "del {nr} er større enn delstørrelsen");
-                    forrige_slutt = start + len;
-                    dekket += len;
-                }
-                assert_eq!(dekket, bytes, "delene dekker ikke hele fila (del={del}, bytes={bytes})");
-            }
-        }
-    }
-
-    /// Hashen regnes nå bitvis mens bytene sendes, i stedet for i et eget gjennomløp først.
-    /// Den MÅ gi samme sum — ellers blir hver senere nedlasting en falsk verifiseringsfeil.
-    #[test]
-    fn bitvis_hash_er_lik_hash_av_hele() {
-        let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
-        let mut hel = xxhash_rust::xxh64::Xxh64::new(0);
-        hel.update(&data);
-        for biter in [1usize, 7, 1024, 65_536, 1 << 20] {
-            let mut delvis = xxhash_rust::xxh64::Xxh64::new(0);
-            for b in data.chunks(biter) { delvis.update(b); }
-            assert_eq!(delvis.digest(), hel.digest(), "bitstørrelse {biter} ga en annen sum");
-        }
-    }
-
-    /// Et filnavn fra et kort (eller fra skapet) skal aldri kunne peke ut av målmappa.
-    #[test]
-    fn trygt_navn_slipper_ikke_ut_av_mappa() {
-        for stygt in ["../hemmelig.arw", "..", "/etc/passwd", "....//x"] {
-            let rent = trygt_navn(stygt);
-            assert!(!rent.contains('/'), "{stygt} ga {rent}");
-            assert!(!rent.contains('\\'), "{stygt} ga {rent}");
-            assert_ne!(rent, "..", "{stygt} ga {rent}");
-            assert_ne!(rent, ".", "{stygt} ga {rent}");
-        }
-    }
-
-    #[test]
-    fn pausene_vokser_og_har_tak() {
-        assert_eq!((0..7).map(pause_enheter).collect::<Vec<_>>(), vec![2, 4, 8, 16, 32, 32, 32]);
-    }
-
-    /// R2 tar maks 10 000 deler. Med fast 16 MB-del var taket ~156 GiB — ett langt 8K-klipp.
-    #[test]
-    fn delstorrelsen_holder_seg_under_deltaket() {
-        const MIB: u64 = 1 << 20;
-        assert_eq!(delstorrelse(1), 16 * MIB);
-        assert_eq!(delstorrelse(100 * 1024 * MIB), 16 * MIB, "vanlige filer skal ikke merke noe");
-        for bytes in [25 * MIB, 140 * 1024 * MIB, 156 * 1024 * MIB, 200 * 1024 * MIB, 1024 * 1024 * MIB, 5 * 1024 * 1024 * MIB] {
-            let del = delstorrelse(bytes);
-            assert!(del >= 16 * MIB && del % MIB == 0, "{bytes}: {del}");
-            assert!(bytes.div_ceil(del) <= MAKS_DELER, "{bytes} B gir {} deler", bytes.div_ceil(del));
-        }
-    }
-
-    /// Bare deler med nøyaktig riktig lengde teller som ferdige; resten sendes på nytt.
-    #[test]
-    fn bare_deler_med_riktig_lengde_teller() {
-        let del = 16u64 << 20;
-        let bytes = 40u64 << 20;
-        let fra_lager = vec![
-            (3, 8 << 20, "c".to_string()),   // siste del, riktig (kortere) lengde
-            (1, del, "a".to_string()),
-            (2, 1000, "b".to_string()),      // halv — må sendes igjen
-            (4, del, "d".to_string()),       // finnes ikke i en fil på 40 MB
-            (1, del, "a".to_string()),       // dobbel
-        ];
-        assert_eq!(gyldige_deler(&fra_lager, del, bytes), vec![(1, "a".to_string()), (3, "c".to_string())]);
-    }
-
-    /// «Pause» midt i en 32 sekunders ventetid mellom to forsøk skal virke med én gang.
-    #[test]
-    fn pausen_mellom_forsok_vaakner_ved_avbryt() {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let s = stopp("x");
-        s.global.store(true, Ordering::Relaxed);
-        let start = std::time::Instant::now();
-        rt.block_on(sov(std::time::Duration::from_secs(32), Some(&s)));
-        assert!(start.elapsed() < std::time::Duration::from_secs(1), "sov ventet {:?}", start.elapsed());
-    }
-
     #[test]
     fn temp_navn_er_unike() {
         let navn: std::collections::HashSet<String> = (0..10_000).map(|_| rand_suffiks()).collect();
         assert_eq!(navn.len(), 10_000);
-    }
-
-    /// En presignert URL er skrive-legitimasjon — den skal aldri ut i en feilmelding.
-    #[test]
-    fn nettfeil_viser_aldri_url() {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let e = rt.block_on(async { enkel_klient().get("http://127.0.0.1:9/r2/x?X-Amz-Signature=hemmelig").send().await }).unwrap_err();
-        let tekst = nettfeil(e);
-        assert!(!tekst.contains("hemmelig") && !tekst.contains("127.0.0.1"), "{tekst}");
-    }
-
-    // ── FALSK PORTAL + LAGER (0.3.0) ─────────────────────────────────────────────────────────
-    //
-    // Nett-logikken er det som ødelegger data eller henger appen når den er feil, og den kan ikke
-    // prøves mot prod uten å rote til et ekte skap. Denne serveren snakker det appen bruker av
-    // /api/rawskap/opplasting og R2, og kan be om uhell: kutte forbindelsen midt i en del, svare
-    // 500 eller 403, eller slutte å lese (en død linje).
-
-    use std::collections::{BTreeMap, HashMap};
-    use std::sync::Mutex;
-
-    #[derive(Clone, Copy, Debug)]
-    enum Uhell { Status(u16), Kutt(usize), Stopp(usize) }
-
-    #[derive(Default)]
-    struct Lager {
-        deler: BTreeMap<u32, Vec<u8>>,
-        objekt: Option<Vec<u8>>,
-        /// PUT-forsøk per del (0 = enkel PUT).
-        forsok: HashMap<u32, u32>,
-        /// (del, forsøk nr.) → uhell.
-        uhell: HashMap<(u32, u32), Uhell>,
-        handlinger: Vec<serde_json::Value>,
-        signeringer: u32,
-        del_bytes: u64,
-        upload_id: String,
-        nedlasting: Vec<u8>,
-        /// GET-forsøk nr. → uhell.
-        ned_uhell: HashMap<u32, Uhell>,
-        ned_range: Vec<Option<u64>>,
-    }
-    impl Lager {
-        fn handlinger(&self, navn: &str) -> Vec<serde_json::Value> { self.handlinger.iter().filter(|h| h["action"] == navn).cloned().collect() }
-        fn forsok(&self, nr: u32) -> u32 { self.forsok.get(&nr).copied().unwrap_or(0) }
-    }
-
-    struct Mock { adr: String, lager: Arc<Mutex<Lager>> }
-
-    async fn start_mock() -> Mock {
-        let lytter = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let adr = format!("http://{}", lytter.local_addr().unwrap());
-        let lager = Arc::new(Mutex::new(Lager { upload_id: "u1".into(), ..Default::default() }));
-        let (l2, a2) = (lager.clone(), adr.clone());
-        tokio::spawn(async move {
-            while let Ok((s, _)) = lytter.accept().await {
-                let (l3, a3) = (l2.clone(), a2.clone());
-                tokio::spawn(async move { let _ = betjen(s, l3, a3).await; });
-            }
-        });
-        Mock { adr, lager }
-    }
-
-    fn http_svar(status: u16, ekstra: &str, kropp: &[u8]) -> Vec<u8> {
-        let mut v = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n{ekstra}\r\n", kropp.len()).into_bytes();
-        v.extend_from_slice(kropp);
-        v
-    }
-
-    async fn betjen(mut s: tokio::net::TcpStream, lager: Arc<Mutex<Lager>>, adr: String) -> std::io::Result<()> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let mut hode = Vec::new();
-        let mut b = [0u8; 1];
-        while !hode.ends_with(b"\r\n\r\n") {
-            if s.read(&mut b).await? == 0 { return Ok(()); }
-            hode.push(b[0]);
-        }
-        let hode = String::from_utf8_lossy(&hode).to_string();
-        let mut linjer = hode.split("\r\n");
-        let mut forste = linjer.next().unwrap_or("").split(' ');
-        let (metode, sti) = (forste.next().unwrap_or("").to_string(), forste.next().unwrap_or("").to_string());
-        let (mut lengde, mut range) = (0usize, None::<u64>);
-        for l in linjer {
-            let l = l.to_ascii_lowercase();
-            if let Some(v) = l.strip_prefix("content-length:") { lengde = v.trim().parse().unwrap_or(0); }
-            if let Some(v) = l.strip_prefix("range:") { range = v.trim().trim_start_matches("bytes=").trim_end_matches('-').parse().ok(); }
-        }
-        // PUT mot lageret. Uhell kan inntreffe FØR hele kroppen er lest.
-        if metode == "PUT" && sti.starts_with("/r2/") {
-            let nr: u32 = sti.trim_start_matches("/r2/").split(['/', '?']).nth(1).and_then(|x| x.parse().ok()).unwrap_or(0);
-            let uhell = {
-                let mut l = lager.lock().unwrap();
-                let f = l.forsok.entry(nr).or_insert(0);
-                *f += 1;
-                let f = *f;
-                l.uhell.get(&(nr, f)).copied()
-            };
-            match uhell {
-                Some(Uhell::Kutt(n)) => { let mut t = vec![0u8; n.min(lengde)]; let _ = s.read_exact(&mut t).await; return Ok(()); }
-                Some(Uhell::Stopp(n)) => { let mut t = vec![0u8; n.min(lengde)]; let _ = s.read_exact(&mut t).await; tokio::time::sleep(std::time::Duration::from_secs(60)).await; return Ok(()); }
-                _ => {}
-            }
-            let mut kropp = vec![0u8; lengde];
-            s.read_exact(&mut kropp).await?;
-            if let Some(Uhell::Status(st)) = uhell { return s.write_all(&http_svar(st, "", b"")).await; }
-            let etag = format!("\"e{nr}-{}\"", kropp.len());
-            { let mut l = lager.lock().unwrap(); if nr == 0 { l.objekt = Some(kropp); } else { l.deler.insert(nr, kropp); } }
-            return s.write_all(&http_svar(200, &format!("ETag: {etag}\r\n"), b"")).await;
-        }
-        if metode == "GET" && sti.starts_with("/api/transfer/versjon") {
-            return s.write_all(&http_svar(200, "Content-Type: application/json\r\n", b"{}")).await;
-        }
-        if metode == "GET" && sti.starts_with("/api/rawskap/original/") {
-            return s.write_all(&http_svar(302, &format!("Location: {adr}/r2/ned\r\n"), b"")).await;
-        }
-        if metode == "GET" && sti.starts_with("/r2/ned") {
-            let (data, uhell) = {
-                let mut l = lager.lock().unwrap();
-                l.ned_range.push(range);
-                let n = l.ned_range.len() as u32;
-                (l.nedlasting.clone(), l.ned_uhell.get(&n).copied())
-            };
-            let fra = (range.unwrap_or(0) as usize).min(data.len());
-            let rest = &data[fra..];
-            let hode = if range.is_some() {
-                format!("HTTP/1.1 206 X\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n", rest.len(), fra, data.len().saturating_sub(1), data.len())
-            } else {
-                format!("HTTP/1.1 200 X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", rest.len())
-            };
-            s.write_all(hode.as_bytes()).await?;
-            if let Some(Uhell::Kutt(n)) = uhell { s.write_all(&rest[..n.min(rest.len())]).await?; return s.flush().await; }
-            return s.write_all(rest).await;
-        }
-        if metode == "POST" && sti.starts_with("/api/rawskap/opplasting") {
-            let mut kropp = vec![0u8; lengde];
-            s.read_exact(&mut kropp).await?;
-            let b: serde_json::Value = serde_json::from_slice(&kropp).unwrap_or_default();
-            let (st, d) = handling(&lager, &adr, &b);
-            return s.write_all(&http_svar(st, "Content-Type: application/json\r\n", d.to_string().as_bytes())).await;
-        }
-        s.write_all(&http_svar(404, "", b"")).await
-    }
-
-    fn handling(lager: &Mutex<Lager>, adr: &str, b: &serde_json::Value) -> (u16, serde_json::Value) {
-        use serde_json::json;
-        let mut l = lager.lock().unwrap();
-        l.handlinger.push(b.clone());
-        let riktig = b["uploadId"].as_str() == Some(l.upload_id.as_str());
-        match b["action"].as_str().unwrap_or("") {
-            "presign" => (200, json!({ "uploadUrl": format!("{adr}/r2/enkel"), "originalKey": "originals/test.bin" })),
-            "multipart-start" => {
-                l.del_bytes = b["delBytes"].as_u64().unwrap_or(0);
-                l.deler.clear();
-                (200, json!({ "ok": true, "uploadId": l.upload_id, "originalKey": "originals/test.bin" }))
-            }
-            "multipart-deler" if riktig => {
-                l.signeringer += 1;
-                let s = l.signeringer;
-                let deler: Vec<_> = b["deler"].as_array().unwrap().iter().map(|n| json!({ "nr": n, "url": format!("{adr}/r2/del/{n}?sig={s}") })).collect();
-                (200, json!({ "ok": true, "deler": deler }))
-            }
-            "multipart-status" if riktig => {
-                let deler: Vec<_> = l.deler.iter().map(|(nr, d)| json!({ "nr": nr, "bytes": d.len(), "etag": format!("e{nr}-{}", d.len()) })).collect();
-                (200, json!({ "ok": true, "delBytes": l.del_bytes, "deler": deler }))
-            }
-            "multipart-fullfor" if riktig => {
-                // Lageret krever stigende delnumre — akkurat som R2.
-                let numre: Vec<u32> = b["deler"].as_array().unwrap().iter().map(|d| d["nr"].as_u64().unwrap() as u32).collect();
-                if numre.windows(2).any(|w| w[0] >= w[1]) { return (400, json!({ "error": "InvalidPartOrder" })); }
-                let mut hel = Vec::new();
-                for nr in &numre {
-                    match l.deler.get(nr) { Some(d) => hel.extend_from_slice(d), None => return (400, json!({ "error": format!("del {nr} mangler") })) }
-                }
-                l.objekt = Some(hel);
-                (200, json!({ "ok": true }))
-            }
-            "multipart-deler" | "multipart-status" | "multipart-fullfor" => (404, json!({ "error": "ukjent opplasting" })),
-            "fullfor" | "avbryt" => (200, json!({ "ok": true })),
-            _ => (400, json!({ "error": "ukjent handling" })),
-        }
-    }
-
-    fn testdata(n: usize, frø: u64) -> Vec<u8> {
-        let mut x = frø.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-        (0..n).map(|_| { x ^= x << 13; x ^= x >> 7; x ^= x << 17; (x >> 24) as u8 }).collect()
-    }
-    fn testfil(navn: &str, data: &[u8]) -> OppFil {
-        let d = std::env::temp_dir().join("rawskap-transfer-test").join("filer");
-        std::fs::create_dir_all(&d).unwrap();
-        let p = d.join(navn);
-        std::fs::write(&p, data).unwrap();
-        OppFil { sti: p.to_string_lossy().to_string(), relativ: navn.into(), bytes: data.len() as u64 }
-    }
-    fn stopp(id: &str) -> Stopp { Stopp { global: Arc::new(AtomicBool::new(false)), sett: Arc::new(std::sync::Mutex::new(Default::default())), id: id.into() } }
-    fn hash(d: &[u8]) -> String { format!("{:016x}", xxhash_rust::xxh64::xxh64(d, 0)) }
-    fn mtime_ms(sti: &str) -> u64 { std::fs::metadata(sti).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 }
-    fn ubegrenset() -> Arc<Struper> { Struper::ny(Arc::new(AtomicU64::new(0))) }
-
-    /// Stand-in for appen: framdrift går ingen steder, og ffmpeg finnes ikke (testfilene er ikke video).
-    #[derive(Clone)]
-    struct Stille;
-    impl Kanal for Stille {
-        fn framdrift(&self, _f: Framdrift) {}
-        fn ffmpeg(&self, _args: &[String]) -> impl std::future::Future<Output = Result<(Vec<u8>, String), String>> + Send { async { Err("ingen ffmpeg i testene".to_string()) } }
-    }
-
-    /// Kjører en asynkron test med korte pauser.
-    fn med_app<F, Fut>(f: F) where F: FnOnce(Stille) -> Fut, Fut: std::future::Future<Output = ()> {
-        TIDSENHET_MS.store(20, Ordering::Relaxed);
-        tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(f(Stille));
-    }
-
-    /// Tre uhell i én opplasting: forbindelsen kuttes midt i del 1, del 2 får 500, og del 3 sin
-    /// signatur har gått ut (403). Fila skal likevel komme fram bit for bit lik, med riktig sjekksum.
-    #[test]
-    fn multipart_taaler_kutt_500_og_utlopt_signatur() {
-        med_app(|app| async move {
-            let m = start_mock().await;
-            let data = testdata(40 << 20, 1);
-            let fil = testfil("mp-uhell.bin", &data);
-            {
-                let mut l = m.lager.lock().unwrap();
-                l.uhell.insert((1, 1), Uhell::Kutt(1 << 20));
-                l.uhell.insert((2, 1), Uhell::Status(500));
-                l.uhell.insert((3, 1), Uhell::Status(403));
-            }
-            let k = klient("test").unwrap();
-            let res = last_opp_en(&app, &k, &bare_opp(), &m.adr, &fil, "", &stopp(&fil.sti), ubegrenset()).await;
-            assert_eq!(res, Ok(()));
-            let l = m.lager.lock().unwrap();
-            assert!(l.objekt.as_deref() == Some(&data[..]), "fila som ble satt sammen er ikke lik originalen");
-            assert_eq!((l.forsok(1), l.forsok(2), l.forsok(3)), (2, 2, 2));
-            assert!(l.signeringer >= 2, "del 3 skulle fått ny signatur etter 403");
-            let fullfor = l.handlinger("fullfor");
-            assert_eq!(fullfor.len(), 1);
-            assert_eq!(fullfor[0]["xxh64"].as_str(), Some(hash(&data).as_str()));
-            assert_eq!(l.handlinger("multipart-start")[0]["delBytes"].as_u64(), Some(16 << 20));
-        });
-    }
-
-    /// Gjenopptak spør lageret, ikke bare resume-fila. Lokal bokføring er tom, men lageret har del 1
-    /// (hel) og del 2 (halv). Del 1 skal IKKE sendes igjen; del 2 skal det.
-    #[test]
-    fn gjenopptak_bruker_lagerets_deler() {
-        med_app(|app| async move {
-            let m = start_mock().await;
-            let data = testdata(40 << 20, 2);
-            let fil = testfil("mp-gjenoppta.bin", &data);
-            let del = 16u64 << 20;
-            {
-                let mut l = m.lager.lock().unwrap();
-                l.deler.insert(1, data[..del as usize].to_vec());
-                l.deler.insert(2, data[del as usize..del as usize + 1000].to_vec());
-                l.del_bytes = del;
-            }
-            let rsti = resume_sti(&fil.sti, fil.bytes, mtime_ms(&fil.sti));
-            resume_skriv(&rsti, &Resume { upload_id: "u1".into(), original_key: "originals/test.bin".into(), bytes: fil.bytes, del_bytes: del, ..Default::default() });
-            let k = klient("test").unwrap();
-            let res = last_opp_en(&app, &k, &bare_opp(), &m.adr, &fil, "", &stopp(&fil.sti), ubegrenset()).await;
-            assert_eq!(res, Ok(()));
-            let l = m.lager.lock().unwrap();
-            assert!(l.objekt.as_deref() == Some(&data[..]), "fila som ble satt sammen er ikke lik originalen");
-            assert_eq!((l.forsok(1), l.forsok(2), l.forsok(3)), (0, 1, 1), "del 1 lå der alt; del 2 var halv");
-            assert!(l.handlinger("multipart-start").is_empty(), "skulle fortsatt den gamle opplastingen");
-            assert_eq!(l.handlinger("multipart-status").len(), 1);
-            // Gjenopptatt = vi har ikke sett hele fila i denne kjøringen, og da sendes ingen sjekksum.
-            assert!(l.handlinger("fullfor")[0].get("xxh64").is_none());
-            assert!(!rsti.exists(), "resume-fila skal ryddes når fila er oppe");
-        });
-    }
-
-    /// En resume-fil som peker på en opplasting portalen ikke kjenner lenger (feiekosten ryddet den),
-    /// skal gi en ny opplasting — ikke en fil som står fast.
-    #[test]
-    fn glemt_opplasting_begynner_paa_nytt() {
-        med_app(|app| async move {
-            let m = start_mock().await;
-            let data = testdata(30 << 20, 3);
-            let fil = testfil("mp-glemt.bin", &data);
-            let rsti = resume_sti(&fil.sti, fil.bytes, mtime_ms(&fil.sti));
-            resume_skriv(&rsti, &Resume { upload_id: "gammel".into(), original_key: "originals/gammel.bin".into(), bytes: fil.bytes, deler: vec![(1, "x".into())], del_bytes: 16 << 20, ..Default::default() });
-            let k = klient("test").unwrap();
-            let res = last_opp_en(&app, &k, &bare_opp(), &m.adr, &fil, "", &stopp(&fil.sti), ubegrenset()).await;
-            assert_eq!(res, Ok(()));
-            let l = m.lager.lock().unwrap();
-            assert!(l.objekt.as_deref() == Some(&data[..]), "fila som ble satt sammen er ikke lik originalen");
-            assert_eq!(l.handlinger("multipart-start").len(), 1);
-            assert_eq!(l.handlinger("fullfor")[0]["xxh64"].as_str(), Some(hash(&data).as_str()), "ny opplasting leser hele fila — da skal sjekksummen med");
-        });
-    }
-
-    /// Enkel PUT (under delgrensa): først en død linje (serveren slutter å lese), så et kutt. Stopp-
-    /// vakta skal ta den døde linja, og sjekksummen skal beskrive forsøket som lyktes — ikke alle tre.
-    #[test]
-    fn enkel_put_taaler_doed_linje_og_kutt() {
-        med_app(|app| async move {
-            let m = start_mock().await;
-            let data = testdata(5 << 20, 4);
-            let fil = testfil("enkel.bin", &data);
-            {
-                let mut l = m.lager.lock().unwrap();
-                l.uhell.insert((0, 1), Uhell::Stopp(64 << 10));
-                l.uhell.insert((0, 2), Uhell::Kutt(1 << 20));
-            }
-            let k = klient("test").unwrap();
-            let start = std::time::Instant::now();
-            let res = last_opp_en(&app, &k, &bare_opp(), &m.adr, &fil, "", &stopp(&fil.sti), ubegrenset()).await;
-            assert_eq!(res, Ok(()));
-            let l = m.lager.lock().unwrap();
-            assert_eq!(l.forsok(0), 3);
-            assert!(l.objekt.as_deref() == Some(&data[..]), "fila er ikke lik originalen");
-            assert_eq!(l.handlinger("fullfor")[0]["xxh64"].as_str(), Some(hash(&data).as_str()));
-            assert!(start.elapsed() < std::time::Duration::from_secs(20), "stopp-vakta skal kutte den døde linja raskt ({:?})", start.elapsed());
-        });
-    }
-
-    /// Nedlasting som kuttes midt i: neste forsøk skal be om resten (Range) og ende med en fil som er
-    /// bit for bit lik — verifisert mot sjekksummen, slik appen gjør.
-    #[test]
-    fn nedlasting_fortsetter_etter_kutt() {
-        med_app(|app| async move {
-            let m = start_mock().await;
-            let data = testdata(3 << 20, 5);
-            {
-                let mut l = m.lager.lock().unwrap();
-                l.nedlasting = data.clone();
-                l.ned_uhell.insert(1, Uhell::Kutt(1 << 20));
-            }
-            let rot = std::env::temp_dir().join("rawskap-transfer-test").join("ned");
-            let _ = std::fs::remove_dir_all(&rot);
-            let fil = Fil { id: "a1".into(), filnavn: "ned.bin".into(), bytes: data.len() as u64, sti: String::new(), xxh64: hash(&data), url: String::new() };
-            let k = klient("test").unwrap();
-            let res = last_ned_med_forsok(&app, &k, &bare_ned(), &m.adr, &fil, &rot, &stopp("a1"), &ubegrenset(), "hopp").await;
-            assert_eq!(res, Ok(()));
-            assert!(std::fs::read(rot.join("ned.bin")).unwrap() == data, "nedlastet fil er ikke lik originalen");
-            let l = m.lager.lock().unwrap();
-            assert_eq!(l.ned_range, vec![None, Some(1 << 20)], "andre forsøk skal fortsette der det første slapp");
-        });
-    }
-
-    /// «Fjern» i køen: serveren får beskjed om nøkkelen, og resume-fila forsvinner.
-    #[test]
-    fn forkast_rydder_hos_serveren_og_lokalt() {
-        med_app(|_app| async move {
-            let m = start_mock().await;
-            let data = testdata(1 << 20, 6);
-            let fil = testfil("forkast.bin", &data);
-            let rsti = resume_sti(&fil.sti, fil.bytes, mtime_ms(&fil.sti));
-            resume_skriv(&rsti, &Resume { upload_id: "u1".into(), original_key: "originals/forkast.bin".into(), bytes: fil.bytes, del_bytes: 16 << 20, ..Default::default() });
-            let n = forkast_opplasting(m.adr.clone(), "test".into(), vec![fil.clone()]).await;
-            assert_eq!(n, Ok(1));
-            assert!(!rsti.exists(), "resume-fila skal være borte");
-            let l = m.lager.lock().unwrap();
-            assert_eq!(l.handlinger("avbryt")[0]["originalKeys"], serde_json::json!(["originals/forkast.bin"]));
-        });
     }
 
     // ── LIGHTROOM-INSTALLASJONEN (0.3.1) ──
