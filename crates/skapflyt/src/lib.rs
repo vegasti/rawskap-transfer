@@ -15,6 +15,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod deling;
+pub mod innlesing;
 pub mod navn;
 pub mod nedlasting;
 pub mod nett;
