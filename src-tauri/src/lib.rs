@@ -20,7 +20,7 @@ use tokio::sync::Semaphore;
 // Nett, opplasting, gjenopptak, nedlasting, kobling, mapper og delinger bor i craten skapflyt
 // (crates/skapflyt, S1 24/10). Her er Tauri-kommandoene, køens jobber, ffmpeg og alt lokalt.
 use skapflyt::innlesing::{self, Kildefil};
-use skapflyt::{bare_ned, bare_opp, enkel_klient, last_ned_med_forsok, last_opp_en, mime_fra, nettfeil, pause_foer_forsok, put_proxy, resume_dir, sikre_mappe, sov, trygt_navn, urlenc, Etterarbeid, Framdrift, Melder, Stopp, Struper};
+use skapflyt::{enkel_klient, last_ned_med_forsok, mime_fra, nettfeil, pause_foer_forsok, put_proxy, resume_dir, sikre_mappe, sov, trygt_navn, urlenc, Etterarbeid, Feil, Framdrift, Klient, Konto, Melder, Stopp, Struper, Valg};
 pub use skapflyt::{Fil, OppFil, SjekkFil};
 
 /// Logg per jobb (valgfritt, Frame.io-stil): én fil i målmappa med start/ferdig
@@ -66,12 +66,15 @@ fn sett_nettverk(tilstand: State<'_, Tilstand>, ned_mbps: u64, opp_mbps: u64) {
 /// User-Agent mot portalen. Appens versjon, ikke cratens — portalloggene skal vise hvilken app som snakker.
 const UA: &str = concat!("RawskapTransfer/", env!("CARGO_PKG_VERSION"));
 
-fn klient(nokkel: &str) -> Result<reqwest::Client, String> { skapflyt::klient(nokkel, UA) }
+/// Klientene mot skapet (T2): portal-, PUT- og GET-klienten med Transfers tak og UA. Én per kommando, sendt rundt.
+fn klient(portal: &str, nokkel: &str) -> Result<Klient, String> {
+    Ok(Klient::ny(&Konto { portal: portal.to_string(), nokkel: nokkel.to_string() }, UA)?)
+}
 
 /// Hent mappetre + filer fra portalen.
 #[tauri::command]
 async fn hent_liste(portal: String, nokkel: String, mappe: String) -> Result<serde_json::Value, String> {
-    skapflyt::hent_liste(portal, nokkel, mappe, UA).await
+    Ok(skapflyt::hent_liste(&klient(&portal, &nokkel)?, &mappe).await?)
 }
 
 /// Last ned et sett filer til en mappe — `parallell` samtidige strømmer.
@@ -88,8 +91,7 @@ async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
             Err(_) => None,
         }
     } else { None };
-    let k = klient(&nokkel)?;
-    let bare = bare_ned();
+    let k = klient(&portal, &nokkel)?;
     let rot = PathBuf::from(&maal);
     tokio::fs::create_dir_all(&rot).await.map_err(|e| format!("{e}"))?;
     let sem = Arc::new(Semaphore::new(parallell.clamp(1, 8)));
@@ -102,7 +104,7 @@ async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
     let struper = Struper::ny(tilstand.ned_mbps.clone());
     let mut jobber = Vec::new();
     for fil in filer {
-        let (app, k, bare, portal, rot, sem, loggen, struper) = (app.clone(), k.clone(), bare.clone(), portal.clone(), rot.clone(), sem.clone(), loggen.clone(), struper.clone());
+        let (app, k, rot, sem, loggen, struper) = (app.clone(), k.clone(), rot.clone(), sem.clone(), loggen.clone(), struper.clone());
         let avbryt = Stopp { global: avbryt.clone(), sett: avbrutte.clone(), id: fil.id.clone() };
         let konflikt = konflikt.clone();
         jobber.push(tokio::spawn(async move {
@@ -111,7 +113,7 @@ async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
             if let Some(l) = &loggen { l.skriv(&format!("🚀 Startet                | ID: {} | {}", fil.id, sti.display())).await; }
             if avbryt.av() { return (fil.id.clone(), Err::<(), String>("Avbrutt".into())); }
             let _ = app.framdrift(Framdrift { id: fil.id.clone(), hentet: 0, total: fil.bytes, status: "laster".into(), feil: None });
-            let res = last_ned_med_forsok(&app, &k, &bare, &portal, &fil, &rot, &avbryt, &struper, &konflikt).await;
+            let res = last_ned_med_forsok(&app, &k, &fil, &rot, &avbryt, &struper, &konflikt).await.map_err(String::from);
             if let Err(e) = &res {
                 let _ = app.framdrift(Framdrift { id: fil.id.clone(), hentet: 0, total: fil.bytes, status: "feil".into(), feil: Some(e.clone()) });
                 if let Some(l) = &loggen { l.skriv(&format!("❌ {:<22} | ID: {} | {}", if e == "Avbrutt" { "Avbrutt" } else { "Feilet" }, fil.id, e)).await; }
@@ -144,14 +146,14 @@ fn maskinnavn() -> String {
 /// Device-kobling (webviewen kan ikke fetch-e portalen — CORS): start → kode.
 #[tauri::command]
 async fn kobling_start(portal: String, maskin: String) -> Result<serde_json::Value, String> {
-    skapflyt::kobling_start(portal, maskin).await
+    Ok(skapflyt::kobling_start(&portal, &maskin).await?)
 }
 
 /// Device-kobling: poll til nøkkelen er godkjent i nettleseren. `hemmelighet` er den lange strengen
 /// `kobling_start` fikk tilbake — se skapflyt::kobling_poll.
 #[tauri::command]
 async fn kobling_poll(portal: String, kode: String, hemmelighet: String) -> Result<serde_json::Value, String> {
-    skapflyt::kobling_poll(portal, kode, hemmelighet).await
+    Ok(skapflyt::kobling_poll(&portal, &kode, &hemmelighet).await?)
 }
 
 // ── VIDEO via ffmpeg-sidecar (22/8, Vegards valg): poster + scrubbe-sprite +
@@ -456,7 +458,7 @@ fn rand_suffiks() -> String {
 /// — reglene (endelig navn = finnes, tomme filer teller ikke) står i skapflyt::mangler_lokalt.
 #[tauri::command]
 async fn mangler_lokalt(rot: String, filer: Vec<SjekkFil>) -> Result<Vec<String>, String> {
-    skapflyt::mangler_lokalt(rot, filer).await
+    Ok(skapflyt::mangler_lokalt(&rot, filer).await?)
 }
 
 /// Bare video, og bare når serveren faktisk tilbød en proxy-URL.
@@ -508,18 +510,18 @@ async fn last_opp(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
     for f in &som_proxy {
         let _ = app.framdrift(Framdrift { id: f.sti.clone(), hentet: f.bytes, total: f.bytes, status: "somProxy".into(), feil: None });
     }
-    let portal = portal.trim_end_matches('/').to_string();
-    let k = klient(&nokkel)?;
-    let bare = bare_opp();
+    let k = klient(&portal, &nokkel)?;
     let cache = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<String, String>::new()));
     let sem = Arc::new(Semaphore::new(parallell.clamp(1, 6)));
     let avbryt = tilstand.avbryt.clone();
     let avbrutte = tilstand.avbrutte.clone();
     if let Ok(mut s) = avbrutte.lock() { s.clear(); }
     let struper = Struper::ny(tilstand.opp_mbps.clone());
+    // Én del om gangen per fil (filene går i parallell i stedet), tilstanden der den alltid har ligget.
+    let valg = Valg { tilstand_dir: resume_dir(), struper: Some(struper), ..Valg::default() };
     let mut jobber = Vec::new();
     for fil in filer {
-        let (app, k, bare, portal, cache, sem, mappe_id, struper) = (app.clone(), k.clone(), bare.clone(), portal.clone(), cache.clone(), sem.clone(), mappe_id.clone(), struper.clone());
+        let (app, k, cache, sem, mappe_id, valg) = (app.clone(), k.clone(), cache.clone(), sem.clone(), mappe_id.clone(), valg.clone());
         let avbryt = Stopp { global: avbryt.clone(), sett: avbrutte.clone(), id: fil.sti.clone() };
         jobber.push(tokio::spawn(async move {
             let _p = sem.acquire().await;
@@ -527,25 +529,26 @@ async fn last_opp(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
             let _ = app.framdrift(Framdrift { id: fil.sti.clone(), hentet: 0, total: fil.bytes, status: "laster".into(), feil: None });
             let rel_dir = std::path::Path::new(&fil.relativ).parent().map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
             log::info!("opp start: {} ({} B)", fil.relativ, fil.bytes);
-            let res = match sikre_mappe(&k, &portal, &mappe_id, &rel_dir, &cache).await {
+            let res = match sikre_mappe(&k, &mappe_id, &rel_dir, &cache).await {
                 Ok(mid) => {
                     // To filforsøk. Hvert har egne omforsøk per del/PUT; dette laget tar det som krever
                     // å begynne på nytt (utløpt signatur på en enkel PUT, sammensetting som feilet).
-                    let mut r = Err(String::new());
+                    let f = skapflyt::opplasting::Fil::fra_sti(&fil.sti, &mid);
+                    let mut r: Result<(), Feil> = Err(Feil::Avbrutt);
                     for forsok in 0..2u32 {
-                        r = last_opp_en(&app, &k, &bare, &portal, &fil, &mid, &avbryt, struper.clone()).await;
+                        r = skapflyt::last_opp(&app, &k, &f, &valg, &avbryt).await.map(|_| ());
                         match &r {
                             Ok(()) => break,
-                            Err(e) if avbryt.av() || e.starts_with("Ikke tilgang") => break,
+                            Err(e) if avbryt.av() || matches!(e, Feil::IkkeTilgang(_)) => break,
                             Err(e) => {
                                 log::warn!("opp {} filforsøk {} feilet: {e}", fil.relativ, forsok + 1);
                                 if forsok == 0 { sov(pause_foer_forsok(1), Some(&avbryt)).await; }
                             }
                         }
                     }
-                    r
+                    r.map_err(String::from)
                 }
-                Err(e) => Err(e),
+                Err(e) => Err(String::from(e)),
             };
             match &res {
                 Ok(()) => log::info!("opp ferdig: {}", fil.relativ),
@@ -582,14 +585,14 @@ async fn les_mappe(sti: String) -> Result<Vec<OppFil>, String> {
 /// Ny mappe i skapet (høyreklikk / verktøylinja).
 #[tauri::command]
 async fn ny_mappe(portal: String, nokkel: String, navn: String, forelder: String) -> Result<serde_json::Value, String> {
-    skapflyt::ny_mappe(portal, nokkel, navn, forelder, UA).await
+    Ok(skapflyt::ny_mappe(&klient(&portal, &nokkel)?, &navn, &forelder).await?)
 }
 
 /// Legg filer i papirkurven (brukes av «Erstatt» ved opplasting).
 #[tauri::command]
 async fn slett_filer(portal: String, nokkel: String, ids: Vec<String>) -> Result<(), String> {
-    let k = klient(&nokkel)?;
-    let r = k.post(format!("{}/api/rawskap/slett", portal.trim_end_matches('/'))).json(&serde_json::json!({ "assetIds": ids })).send().await.map_err(nettfeil)?;
+    let k = klient(&portal, &nokkel)?;
+    let r = k.api().post(format!("{}/api/rawskap/slett", portal.trim_end_matches('/'))).json(&serde_json::json!({ "assetIds": ids })).send().await.map_err(nettfeil)?;
     if !r.status().is_success() { return Err(format!("Kunne ikke slette ({})", r.status())); }
     Ok(())
 }
@@ -852,21 +855,21 @@ async fn synk_merk(st: State<'_, SynkTilstand>, id: String, filer: Vec<OppFil>, 
 /// adgangsnøkkelen for passord-/inviterte delinger (tom for åpne) — se skapflyt::hent_deling.
 #[tauri::command]
 async fn hent_deling(portal: String, token: String, nokkel: Option<String>) -> Result<serde_json::Value, String> {
-    skapflyt::hent_deling(portal, token, nokkel).await
+    Ok(skapflyt::hent_deling(&portal, &token, nokkel.as_deref()).await?)
 }
 
 /// Passord → kortlevd adgangsnøkkel for en passordbeskyttet deling (19/9). ⚠ Passordet sendes ÉN
 /// gang og lagres ingen steder — verken her eller i frontenden.
 #[tauri::command]
 async fn deling_passord(portal: String, token: String, passord: String) -> Result<String, String> {
-    skapflyt::deling_passord(portal, token, passord).await
+    Ok(skapflyt::deling_passord(&portal, &token, &passord).await?)
 }
 
 /// Semantisk søk i skapet (samme motor som nettsøket) → [{id, score}].
 #[tauri::command]
 async fn sok(portal: String, nokkel: String, q: String) -> Result<serde_json::Value, String> {
-    let k = klient(&nokkel)?;
-    let r = k.get(format!("{}/api/rawskap/sok-semantisk?q={}", portal.trim_end_matches('/'), urlenc(&q))).send().await.map_err(nettfeil)?;
+    let k = klient(&portal, &nokkel)?;
+    let r = k.api().get(format!("{}/api/rawskap/sok-semantisk?q={}", portal.trim_end_matches('/'), urlenc(&q))).send().await.map_err(nettfeil)?;
     let st = r.status().as_u16();
     let d: serde_json::Value = r.json().await.map_err(nettfeil)?;
     if st == 503 { return Err("Søk i skapet er ikke satt opp på kontoen".into()); }
@@ -886,10 +889,8 @@ fn avbryt(tilstand: State<'_, Tilstand>) {
 /// opplasting; serveren eier nøkkelen og «fyll bare tomt»-regelen for plakat.
 #[tauri::command]
 async fn lenk_proxy(app: AppHandle, portal: String, nokkel: String, asset_id: String, sti: String) -> Result<serde_json::Value, String> {
-    let portal = portal.trim_end_matches('/').to_string();
-    let k = klient(&nokkel)?;
-    let bare = bare_opp();
-    lenk_en(&App(app), &k, &bare, &portal, &asset_id, &sti).await?;
+    let k = klient(&portal, &nokkel)?;
+    lenk_en(&App(app), k.api(), k.opp(), k.portal(), &asset_id, &sti).await?;
     Ok(serde_json::json!({ "ok": true }))
 }
 
@@ -932,11 +933,9 @@ async fn lenk_en(app: &App, k: &reqwest::Client, bare: &reqwest::Client, portal:
 /// lenk hvert treff. 69 høyreklikk blir ett.
 #[tauri::command]
 async fn lenk_proxy_mappe(app: AppHandle, portal: String, nokkel: String, mappe_id: String, lokal: String) -> Result<serde_json::Value, String> {
-    let portal = portal.trim_end_matches('/').to_string();
-    let k = klient(&nokkel)?;
-    let bare = bare_opp();
+    let k = klient(&portal, &nokkel)?;
     let app = App(app);
-    let r = k.post(format!("{}/api/rawskap/opplasting", portal))
+    let r = k.api().post(format!("{}/api/rawskap/opplasting", k.portal()))
         .json(&serde_json::json!({ "action": "proxy-lenk-kandidater", "mappeId": mappe_id })).send().await.map_err(nettfeil)?;
     let d: serde_json::Value = r.json().await.map_err(nettfeil)?;
     let kandidater: Vec<(String, String)> = d["kandidater"].as_array().map(|a| a.iter()
@@ -961,7 +960,7 @@ async fn lenk_proxy_mappe(app: AppHandle, portal: String, nokkel: String, mappe_
         let _ = app.0.emit("lenk-framdrift", serde_json::json!({ "navn": navn, "n": i + 1, "total": total }));
         match kart.get(&stem) {
             None => { mangler += 1; }
-            Some((_, sti)) => match lenk_en(&app, &k, &bare, &portal, id, sti).await {
+            Some((_, sti)) => match lenk_en(&app, k.api(), k.opp(), k.portal(), id, sti).await {
                 Ok(()) => { lenket += 1; }
                 Err(e) => { feilet.push(serde_json::json!({ "navn": navn, "feil": e })); }
             },
@@ -974,14 +973,14 @@ async fn lenk_proxy_mappe(app: AppHandle, portal: String, nokkel: String, mappe_
 /// slutten. Bare de tre okt-handlingene slippes gjennom — se skapflyt::opplasting_okt.
 #[tauri::command]
 async fn opplasting_okt(portal: String, nokkel: String, data: serde_json::Value) -> Result<serde_json::Value, String> {
-    skapflyt::opplasting_okt(portal, nokkel, data, UA).await
+    Ok(skapflyt::opplasting_okt(&klient(&portal, &nokkel)?, data).await?)
 }
 
 /// DEL FRA APPEN (0.2.0): opprett en LEVENDE mappe-deling med kundens egne delings-defaults —
 /// se skapflyt::del_mappe.
 #[tauri::command]
 async fn del_mappe(portal: String, nokkel: String, mappe_id: String, navn: String) -> Result<serde_json::Value, String> {
-    skapflyt::del_mappe(portal, nokkel, mappe_id, navn, UA).await
+    Ok(skapflyt::del_mappe(&klient(&portal, &nokkel)?, &mappe_id, &navn).await?)
 }
 
 /// MINNEKORT-INNLASTING (0.2.0, DIT): kopier fra kort til arkiv/NAS med
@@ -1198,7 +1197,7 @@ async fn installer_lightroom_til(portal: &str, moduler: &Path) -> Result<serde_j
 /// slettes. ⚠ Pause og «Avbryt» skal IKKE kalle dette — se skapflyt::forkast_opplasting.
 #[tauri::command]
 async fn forkast_opplasting(portal: String, nokkel: String, filer: Vec<OppFil>) -> Result<u32, String> {
-    skapflyt::forkast_opplasting(portal, nokkel, filer, UA).await
+    Ok(skapflyt::forkast_opplasting(&klient(&portal, &nokkel)?, &Valg::default(), &filer).await?)
 }
 
 /// Om → «Åpne loggmappa» (0.3.0).
