@@ -14,6 +14,11 @@
 // (`proxyKey` + `proxyPutUrl` for video og MXF), og `versjonAv`: forsjekk ved presign/multipart-start, og ved fullfør
 // (BARE kallets felt, eierskapet på nøkkelen først) OK (`versjonAv: <rot>`), endelig nei (`ryddet` = noe ble fjernet,
 // `borte: true` da; `id` + `ryddet: false` når feiekosten alt laget raden) og `midlertidig` (503, alt står).
+//
+// F8 (0.2.1): `proxy-lenk-start {id}` → `{ok, proxyPutUrl, varighet, harPlakat}` og `proxy-lenk-fullfor {id,
+// proxyStorrelse}` → `{ok}` for en rad som alt er i skapet (ruta: raden må være video, nøkkelen er serverens egen
+// `proxyNokkel`, og gulvet på størrelsen er det samme). Hver PUT av en avspillingskopi står i `handlinger` som
+// `{action: "proxy-put", sti}`, så testene ser rekkefølgen; en adresse med «utlopt» i seg svarer 403, som R2.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -45,6 +50,26 @@ pub struct Pending {
 #[derive(Clone, Debug, Default)]
 pub struct Rad { pub id: String, pub versjon_av: String }
 
+/// Det fullfør lagret om raden som `proxy-lenk-*` ser på (ruta: Mime, Varighet, ThumbUrl).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RadVideo {
+    /// Mimetypen slik ruta lagrer den: MXF blir `video/mxf`.
+    pub mime: String,
+    pub varighet: f64,
+    /// Fullfør hadde plakat (`posterBase64`).
+    pub plakat: bool,
+}
+
+/// En avspillingskopi `proxy-lenk-fullfor` godtok (F8).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Lenking {
+    /// Fil-id-en (raden).
+    pub id: String,
+    /// Serverens egen `proxyNokkel` av radens original.
+    pub proxy_key: String,
+    pub proxy_storrelse: u64,
+}
+
 #[derive(Default)]
 pub struct Lager {
     pub deler: BTreeMap<u32, Vec<u8>>,
@@ -53,6 +78,7 @@ pub struct Lager {
     pub forsok: HashMap<u32, u32>,
     /// (del, forsøk nr.) → uhell.
     pub uhell: HashMap<(u32, u32), Uhell>,
+    /// POST-kroppene til portalen i rekkefølge — og hver PUT av en avspillingskopi som `{action: "proxy-put", sti}`.
     pub handlinger: Vec<serde_json::Value>,
     pub signeringer: u32,
     pub del_bytes: u64,
@@ -82,6 +108,12 @@ pub struct Lager {
     pub proxy: Option<Vec<u8>>,
     /// Fullfør godtok proxy-nøkkelen (den var lik den serveren selv ville laget).
     pub proxy_godtatt: Option<String>,
+    /// originalKey → det fullfør lagret om raden (for `proxy-lenk-*`). Rader testen legger inn selv, har ingen.
+    pub rad_video: HashMap<String, RadVideo>,
+    /// Avspillingskopiene `proxy-lenk-fullfor` godtok, i rekkefølge (F8).
+    pub lenket: Vec<Lenking>,
+    /// `proxy-lenk-start` svarer med denne statusen (ruta: 502 når signeringen feiler).
+    pub lenk_start_feil: Option<u16>,
     /// Pause før lageret svarer på en del (så flere deler i lufta faktisk overlapper).
     pub put_pause_ms: u64,
     pub samtidige: usize,
@@ -142,11 +174,17 @@ async fn betjen(mut s: tokio::net::TcpStream, lager: Arc<Mutex<Lager>>, adr: Str
         if let Some(v) = l.strip_prefix("content-length:") { lengde = v.trim().parse().unwrap_or(0); }
         if let Some(v) = l.strip_prefix("range:") { range = v.trim().trim_start_matches("bytes=").trim_end_matches('-').parse().ok(); }
     }
-    // Avspillingskopien til tilbudets adresse.
+    // Avspillingskopien til tilbudets adresse (eller lenkingens, F8). En adresse med «utlopt» har gått ut: 403, som R2.
     if metode == "PUT" && sti.starts_with("/r2/proxy") {
         let mut kropp = vec![0u8; lengde];
         s.read_exact(&mut kropp).await?;
-        lager.lock().unwrap().proxy = Some(kropp);
+        let utlopt = sti.contains("utlopt");
+        {
+            let mut l = lager.lock().unwrap();
+            l.handlinger.push(serde_json::json!({ "action": "proxy-put", "sti": sti }));
+            if !utlopt { l.proxy = Some(kropp); }
+        }
+        if utlopt { return s.write_all(&http_svar(403, "", b"")).await; }
         return s.write_all(&http_svar(200, "ETag: \"proxy\"\r\n", b"")).await;
     }
     // PUT mot lageret. Uhell kan inntreffe FØR hele kroppen er lest.
@@ -298,6 +336,7 @@ fn handling(lager: &Mutex<Lager>, adr: &str, b: &serde_json::Value) -> (u16, ser
         }
         "multipart-deler" | "multipart-status" | "multipart-fullfor" => (404, json!({ "error": "ukjent opplasting" })),
         "fullfor" => fullfor(&mut l, &key, &versjon_av, b),
+        "proxy-lenk-start" | "proxy-lenk-fullfor" => proxy_lenk(&mut l, adr, b),
         "avbryt" => {
             for k in b["originalKeys"].as_array().cloned().unwrap_or_default() {
                 let k = k.as_str().unwrap_or("").to_string();
@@ -351,8 +390,37 @@ fn fullfor(l: &mut Lager, key: &str, versjon_av: &str, b: &serde_json::Value) ->
     if b["proxyKey"].as_str().is_some_and(|p| p == l.proxy_nokkel(key)) { l.proxy_godtatt = b["proxyKey"].as_str().map(String::from); }
     let id = format!("recTest{:010}", l.rader.len() + 1);
     l.rader.insert(key.to_string(), Rad { id: id.clone(), versjon_av: rot.clone().unwrap_or_default() });
+    // Det `proxy-lenk-*` ser på. Ruta normaliserer MXF til video/mxf før raden lagres.
+    let mime_inn = b["mimeType"].as_str().unwrap_or("");
+    let mime = if key.ends_with(".mxf") && !mime_inn.starts_with("video/") { "video/mxf".to_string() } else { mime_inn.to_string() };
+    let plakat = b["posterBase64"].as_str().is_some_and(|p| !p.is_empty());
+    l.rad_video.insert(key.to_string(), RadVideo { mime, varighet: b["varighet"].as_f64().unwrap_or(0.0), plakat });
     l.pending.remove(key);
     let mut svar = json!({ "ok": true, "id": id });
     if let Some(r) = rot { svar["versjonAv"] = json!(r); }
     (200, svar)
+}
+
+/// route.ts `proxy-lenk-start` / `proxy-lenk-fullfor` (F8): avspillingskopi til en fil som alt er i skapet.
+fn proxy_lenk(l: &mut Lager, adr: &str, b: &serde_json::Value) -> (u16, serde_json::Value) {
+    use serde_json::json;
+    let id = b["id"].as_str().unwrap_or("");
+    // Raden med id-en (ruta: bildebank where id = … og Eier = kunden).
+    let Some(key) = l.rader.iter().find(|(_, r)| !id.is_empty() && r.id == id).map(|(k, _)| k.clone()) else {
+        return (404, json!({ "error": "ukjent fil" }));
+    };
+    let video = l.rad_video.get(&key).cloned().unwrap_or_default();
+    if !video.mime.starts_with("video/") { return (400, json!({ "error": "ikke video" })); }
+    if b["action"] == "proxy-lenk-start" {
+        if let Some(st) = l.lenk_start_feil { return (st, json!({ "error": "Kunne ikke signere: test" })); }
+        return (200, json!({ "ok": true, "proxyPutUrl": format!("{adr}/r2/proxy?sig=lenk"), "varighet": video.varighet, "harPlakat": video.plakat }));
+    }
+    let p_str = b["proxyStorrelse"].as_u64().unwrap_or(0);
+    // Samme gulv som ruta: under 100 kB/s av varigheten er ingen ekte proxy.
+    if p_str <= 10_000 || (video.varighet > 0.0 && (p_str as f64) < video.varighet * 100_000.0) {
+        return (400, json!({ "error": "Proxyen ser ut til å være for kort — er det hele klippet?" }));
+    }
+    let proxy_key = l.proxy_nokkel(&key);
+    l.lenket.push(Lenking { id: id.to_string(), proxy_key, proxy_storrelse: p_str });
+    (200, json!({ "ok": true }))
 }

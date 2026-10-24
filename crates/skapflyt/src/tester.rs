@@ -652,6 +652,224 @@ fn proxy_key_fra_tilbudet() {
     });
 }
 
+// ── F8: proxy-adressen i tilbudet lever 7200 s ──
+
+/// Som MedProxy, men den husker statusene i rekkefølge, melder «proxy» mens kopien lages (som Transfer), og legger
+/// plakat og varighet i fullfør (som Transfers videofelt).
+#[derive(Clone)]
+struct Opptak { proxy: PathBuf, statuser: Arc<std::sync::Mutex<Vec<String>>> }
+impl Opptak {
+    fn ny(proxy: PathBuf) -> Opptak { Opptak { proxy, statuser: Default::default() } }
+    fn statuser(&self) -> Vec<String> { self.statuser.lock().unwrap().clone() }
+}
+impl Melder for Opptak {
+    fn framdrift(&self, f: Framdrift) { self.statuser.lock().unwrap().push(f.status); }
+}
+impl Etterarbeid for Opptak {
+    fn avspillingskopi(&self, bare: &reqwest::Client, portal: &str, sti: &str, _navn: &str, proxy_put: &str, bytes: u64) -> impl std::future::Future<Output = Option<u64>> + Send {
+        let (b, p, u, f, app, id) = (bare.clone(), portal.to_string(), proxy_put.to_string(), self.proxy.clone(), self.clone(), sti.to_string());
+        async move {
+            if u.is_empty() { return None; }
+            meld(&app, &id, bytes, bytes, "proxy");
+            put_proxy(&b, &p, &u, &f).await
+        }
+    }
+    fn ulesbar_video(&self, _sti: &str, _navn: &str) -> impl std::future::Future<Output = bool> + Send { async { false } }
+    fn videofelt(&self, _sti: &str, _navn: &str, _bytes: u64, body: &mut serde_json::Value) -> impl std::future::Future<Output = ()> + Send {
+        body["posterBase64"] = serde_json::json!("data:image/jpeg;base64,/9j/");
+        body["varighet"] = serde_json::json!(0.1);
+        async {}
+    }
+}
+
+fn naa() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 }
+const TRE_TIMER_MS: u64 = 3 * 60 * 60 * 1000;
+/// Hvor statusen først ble meldt.
+fn pos(s: &[String], navn: &str) -> usize { s.iter().position(|x| x == navn).unwrap_or_else(|| panic!("«{navn}» mangler i {s:?}")) }
+/// Rekkefølgen på fullfør, lenkingen og PUT-ene av kopien.
+fn proxy_rekke(l: &Lager) -> Vec<String> {
+    l.handlinger.iter().filter_map(|h| h["action"].as_str()).filter(|a| a.starts_with("proxy") || *a == "fullfor").map(String::from).collect()
+}
+
+#[test]
+fn proxy_adressens_alder() {
+    let n = 1_800_000_000_000u64;
+    assert!(proxy_fersk(n, n));
+    assert!(proxy_fersk(n - 99 * 60_000, n));
+    assert!(!proxy_fersk(n - 101 * 60_000, n));
+    assert!(!proxy_fersk(0, n), "0 = ukjent alder (tilstand fra før feltet fantes)");
+    assert!(!proxy_fersk(n + TRE_TIMER_MS, n), "langt fram i tid er like ukjent");
+    assert!(PROXY_FERSK_MS < 7_200_000, "serveren signerer adressen for 7200 s");
+}
+
+/// F8: en fersk adresse (også gjenopptatt samme dag) gir det samme som før — kopien går til tilbudets adresse FØR
+/// fullfør, nøkkelen står i fullfør, og ingenting lenkes etterpå. `proxy_tid` skrives når tilbudet tas imot, både ved
+/// multipart-start og presign.
+#[test]
+fn fersk_proxy_adresse_gaar_foer_fullfor() {
+    med_app(|_app| async move {
+        let m = start_mock().await;
+        let data = testdata(40 << 20, 81);
+        let p = testfil("fersk.mp4", &data);
+        let kopi = testfil("fersk-proxy.mp4", &testdata(20_000, 82));
+        m.lager.lock().unwrap().uhell.insert((2, 1), Uhell::Status(400));
+        let (k, v) = (klient(&m), valg("proxy-fersk"));
+        let foer = naa();
+        assert!(last_opp(&Opptak::ny(kopi.clone()), &k, &OppTil::fra_sti(&p, ""), &v, &stopp("x")).await.is_err());
+        let t = resume_les(&tilstand_for(&v, &p, "")).expect("tilstanden skal stå etter bruddet");
+        assert!(t.proxy_put.ends_with("/r2/proxy?sig=1") && t.proxy_key == "proxy/test.mp4", "{t:?}");
+        assert!(t.proxy_tid >= foer && t.proxy_tid <= naa(), "proxy_tid ved multipart-start: {}", t.proxy_tid);
+        let app = Opptak::ny(kopi.clone());
+        let res = last_opp(&app, &k, &OppTil::fra_sti(&p, ""), &v, &stopp("x")).await.unwrap();
+        assert!(!res.allerede);
+        {
+            let l = m.lager.lock().unwrap();
+            assert!(l.objekt.as_deref() == Some(&data[..]), "fila som ble satt sammen er ikke lik originalen");
+            assert_eq!(proxy_rekke(&l), ["proxy-put", "fullfor"], "kopien går før fullfør, og ingenting lenkes");
+            assert_eq!(l.handlinger("proxy-put")[0]["sti"], "/r2/proxy?sig=1");
+            let f = &l.handlinger("fullfor")[0];
+            assert_eq!((f["proxyKey"].as_str(), f["proxyStorrelse"].as_u64()), (Some("proxy/test.mp4"), Some(20_000)));
+            assert_eq!(l.proxy_godtatt.as_deref(), Some("proxy/test.mp4"));
+            assert!(l.lenket.is_empty());
+        }
+        let s = app.statuser();
+        assert!(pos(&s, "proxy") < pos(&s, "fullfor") && s.last().map(String::as_str) == Some("ferdig"), "{s:?}");
+
+        // presign: tidspunktet står i tilstanden når bare fullfør gjenstår («midlertidig» lar alt stå).
+        let m = start_mock().await;
+        let p = testfil("fersk-liten.mov", &testdata(2 << 20, 83));
+        m.lager.lock().unwrap().utgaver_fullfor.insert("recMaal000000081".into(), TestUtgave::Midlertidig);
+        let mut fil = OppTil::fra_sti(&p, "");
+        fil.versjon_av = Some("recMaal000000081".into());
+        let (k, v) = (klient(&m), valg("proxy-fersk-presign"));
+        let foer = naa();
+        assert!(last_opp(&Opptak::ny(kopi.clone()), &k, &fil, &v, &stopp("x")).await.is_err());
+        let t = resume_les(&tilstand_for(&v, &p, "")).expect("tilstanden skal stå");
+        assert!(t.satt_sammen && !t.proxy_put.is_empty() && t.proxy_tid >= foer && t.proxy_tid <= naa(), "proxy_tid ved presign: {t:?}");
+        m.lager.lock().unwrap().utgaver_fullfor.clear();
+        last_opp(&Opptak::ny(kopi), &k, &fil, &v, &stopp("x")).await.unwrap();
+        let l = m.lager.lock().unwrap();
+        assert!(l.handlinger("proxy-lenk-start").is_empty() && l.lenket.is_empty(), "fersk adresse — ingen lenking");
+        assert_eq!(l.handlinger("fullfor").last().unwrap()["proxyKey"], "proxy/test.mp4");
+    });
+}
+
+/// F8: gjenopptatt dagen etter — tilbudets adresse har gått ut. Ingen PUT dit, fullfør uten proxyKey (men med plakat og
+/// felt som før), og så lenkes kopien med en fersk adresse: start → PUT → fullfør, med serverens nøkkel og størrelsen.
+/// Sluttstatusen kommer etter lenkingen. Det samme for en tilstand fra før feltet fantes (`proxy_tid` 0), der bare
+/// fullfør gjensto.
+#[test]
+fn gammel_proxy_adresse_lenkes_etter_fullfor() {
+    med_app(|_app| async move {
+        let m = start_mock().await;
+        let data = testdata(40 << 20, 84);
+        let p = testfil("gammel.mp4", &data);
+        let kopi = testfil("gammel-proxy.mp4", &testdata(20_000, 85));
+        let del = 16u64 << 20;
+        {
+            let mut l = m.lager.lock().unwrap();
+            l.deler.insert(1, data[..del as usize].to_vec());
+            l.del_bytes = del;
+            l.paabegynt("originals/test.mp4", "u9");
+        }
+        let v = valg("proxy-gammel");
+        resume_skriv(&tilstand_for(&v, &p, ""), &Resume {
+            versjon: 2, sti: p.to_string_lossy().into(), upload_id: "u9".into(), original_key: "originals/test.mp4".into(),
+            bytes: data.len() as u64, sist_endret: mtime_ms(&p), del_bytes: del, deler: vec![(1, format!("e1-{del}"))],
+            proxy_put: format!("{}/r2/proxy?sig=utlopt", m.adr), proxy_key: "proxy/test.mp4".into(), proxy_tid: naa() - TRE_TIMER_MS,
+            ..Default::default()
+        });
+        let app = Opptak::ny(kopi.clone());
+        let res = last_opp(&app, &klient(&m), &OppTil::fra_sti(&p, ""), &v, &stopp("x")).await.unwrap();
+        assert!(res.id.starts_with("rec") && !res.allerede, "{res:?}");
+        {
+            let l = m.lager.lock().unwrap();
+            assert!(l.objekt.as_deref() == Some(&data[..]), "fila som ble satt sammen er ikke lik originalen");
+            assert_eq!((l.forsok(1), l.forsok(2), l.forsok(3)), (0, 1, 1), "gjenopptatt fra del 2");
+            assert_eq!(proxy_rekke(&l), ["fullfor", "proxy-lenk-start", "proxy-put", "proxy-lenk-fullfor"]);
+            assert_eq!(l.handlinger("proxy-put")[0]["sti"], "/r2/proxy?sig=lenk", "aldri til den gamle adressen");
+            let f = &l.handlinger("fullfor")[0];
+            assert!(f.get("proxyKey").is_none() && f.get("proxyStorrelse").is_none() && f.get("proxyUlesbar").is_none(), "{f}");
+            assert!(f["posterBase64"].is_string() && f["varighet"].is_number(), "plakat og felt går med i fullfør som før");
+            assert_eq!(l.handlinger("proxy-lenk-start")[0], serde_json::json!({ "action": "proxy-lenk-start", "id": res.id }));
+            assert_eq!(l.handlinger("proxy-lenk-fullfor")[0], serde_json::json!({ "action": "proxy-lenk-fullfor", "id": res.id, "proxyStorrelse": 20_000 }));
+            assert_eq!(l.lenket, [Lenking { id: res.id.clone(), proxy_key: "proxy/test.mp4".into(), proxy_storrelse: 20_000 }]);
+            assert!(l.proxy.as_deref() == Some(&std::fs::read(&kopi).unwrap()[..]), "kopien kom fram");
+        }
+        assert!(!tilstand_for(&v, &p, "").exists());
+        let s = app.statuser();
+        assert!(pos(&s, "fullfor") < pos(&s, "proxy"), "kopien lages etter fullfør: {s:?}");
+        assert_eq!(s.last().map(String::as_str), Some("ferdig"), "sluttstatusen kommer etter lenkingen: {s:?}");
+        assert_eq!(s.iter().filter(|x| *x == "ferdig").count(), 1, "{s:?}");
+
+        // Fra før feltet fantes (proxy_tid 0 = ukjent alder), og bare fullfør gjensto.
+        let m = start_mock().await;
+        let data = testdata(2 << 20, 86);
+        let p = testfil("gammel-ukjent.mov", &data);
+        m.lager.lock().unwrap().paabegynt("originals/test.mov", "x");
+        let v = valg("proxy-ukjent");
+        resume_skriv(&tilstand_for(&v, &p, ""), &Resume {
+            versjon: 2, sti: p.to_string_lossy().into(), original_key: "originals/test.mov".into(), bytes: data.len() as u64,
+            sist_endret: mtime_ms(&p), proxy_put: format!("{}/r2/proxy?sig=utlopt", m.adr), proxy_key: "proxy/test.mp4".into(),
+            satt_sammen: true, ..Default::default()
+        });
+        let res = last_opp(&Opptak::ny(kopi), &klient(&m), &OppTil::fra_sti(&p, ""), &v, &stopp("x")).await.unwrap();
+        let l = m.lager.lock().unwrap();
+        assert_eq!(l.forsok(0), 0, "bytene lå der alt");
+        assert_eq!(proxy_rekke(&l), ["fullfor", "proxy-lenk-start", "proxy-put", "proxy-lenk-fullfor"]);
+        assert_eq!(l.handlinger("proxy-put")[0]["sti"], "/r2/proxy?sig=lenk");
+        assert_eq!(l.lenket, [Lenking { id: res.id, proxy_key: "proxy/test.mp4".into(), proxy_storrelse: 20_000 }]);
+    });
+}
+
+/// F8: lenkingen er best effort. Feiler `proxy-lenk-start` (signeringen svarer 502), er opplastingen likevel ferdig: ingen
+/// PUT, ingen `proxy-lenk-fullfor`, sluttstatusen som før, og tilstanden ryddet. Fantes fila fra før (`allerede`), lenkes
+/// ingenting.
+#[test]
+fn lenking_som_feiler_velter_ikke_opplastingen() {
+    med_app(|_app| async move {
+        let m = start_mock().await;
+        let kopi = testfil("lenk-feil-proxy.mp4", &testdata(20_000, 87));
+        let data = testdata(2 << 20, 88);
+        let p = testfil("lenk-feil.mp4", &data);
+        {
+            let mut l = m.lager.lock().unwrap();
+            l.lenk_start_feil = Some(502);
+            l.paabegynt("originals/test.mp4", "x");
+        }
+        let v = valg("lenk-feil");
+        let gammel = |p: &Path, m: &Mock| Resume {
+            versjon: 2, sti: p.to_string_lossy().into(), original_key: "originals/test.mp4".into(), bytes: std::fs::metadata(p).unwrap().len(),
+            sist_endret: mtime_ms(p), proxy_put: format!("{}/r2/proxy?sig=utlopt", m.adr), proxy_key: "proxy/test.mp4".into(),
+            proxy_tid: naa() - TRE_TIMER_MS, satt_sammen: true, ..Default::default()
+        };
+        resume_skriv(&tilstand_for(&v, &p, ""), &gammel(&p, &m));
+        let app = Opptak::ny(kopi.clone());
+        let res = last_opp(&app, &klient(&m), &OppTil::fra_sti(&p, ""), &v, &stopp("x")).await.expect("opplastingen er ferdig selv om kopien ikke ble lenket");
+        assert!(res.id.starts_with("rec") && !res.allerede, "{res:?}");
+        {
+            let l = m.lager.lock().unwrap();
+            assert!(!l.handlinger("proxy-lenk-start").is_empty());
+            assert!(l.handlinger("proxy-put").is_empty() && l.handlinger("proxy-lenk-fullfor").is_empty() && l.lenket.is_empty());
+        }
+        assert!(!tilstand_for(&v, &p, "").exists(), "fila er i skapet — tilstanden ryddes");
+        assert_eq!(app.statuser().last().map(String::as_str), Some("ferdig"));
+
+        // Fila fantes fra før: ingen lenking.
+        let m = start_mock().await;
+        m.lager.lock().unwrap().rader.insert("originals/test.mp4".into(), Rad { id: "recFraFoer000001".into(), versjon_av: String::new() });
+        let p = testfil("lenk-allerede.mp4", &data);
+        let v = valg("lenk-allerede");
+        resume_skriv(&tilstand_for(&v, &p, ""), &gammel(&p, &m));
+        let app = Opptak::ny(kopi);
+        let res = last_opp(&app, &klient(&m), &OppTil::fra_sti(&p, ""), &v, &stopp("x")).await.unwrap();
+        assert!(res.allerede && res.id == "recFraFoer000001", "{res:?}");
+        let l = m.lager.lock().unwrap();
+        assert!(l.handlinger("proxy-lenk-start").is_empty() && l.handlinger("proxy-put").is_empty());
+        assert_eq!(app.statuser().last().map(String::as_str), Some("hoppet"));
+    });
+}
+
 /// F9: de påbegynte opplastingene står i tilstandsmappa med sti, navn, mappe og hvor mye som er sendt — så appen kan
 /// tilby «Fortsett» etter en omstart. Synk-minnet og v1-filer (uten sti) er ikke med.
 #[test]

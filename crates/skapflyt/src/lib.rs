@@ -13,6 +13,8 @@
 // parallelle deler, `Opplastet` med fil-id-en, proxyKey fra serveren, ny utgave (versjonAv), `uferdige()` og tilstand v2.
 // Transfers oppførsel står: samme JSON (nye nøkler bare når de nye feltene er satt), samme tekster (`Feil` sin Display).
 //
+// F8 (0.2.1): en avspillingskopi med utløpt tilbudsadresse lenkes etter fullfør i stedet for å gå tapt (se opplasting).
+//
 // ⚠ To typer heter Fil: `skapflyt::Fil` er en fil i SKAPET (nedlasting, som før), `skapflyt::opplasting::Fil` er en
 // fil som skal DIT.
 //
@@ -94,10 +96,15 @@ pub trait Melder: Clone + Send + Sync + 'static {
 /// ffmpeg-sidecaren; craten vet ingenting om ffmpeg. En app uten noe slikt svarer «ingenting».
 ///
 /// Rekkefølgen er den samme som før uttrekket: `avspillingskopi` → `ulesbar_video` (bare når det
-/// ikke ble noen kopi) → framdrift «fullfor» → `videofelt` → fullfør-kallet.
+/// ikke ble noen kopi) → framdrift «fullfor» → `videofelt` → fullfør-kallet → sluttstatus.
+///
+/// F8 (0.2.1): er tilbudets adresse eldre enn `PROXY_FERSK_MS` (den lever 7200 s), kalles ikke `avspillingskopi`
+/// først. Da blir det `ulesbar_video` → «fullfor» → `videofelt` → fullfør-kallet (uten kopien) → `proxy-lenk-start` →
+/// `avspillingskopi` med den nye adressen → `proxy-lenk-fullfor` → sluttstatus.
 pub trait Etterarbeid: Clone + Send + Sync + 'static {
     /// Lag og last opp avspillingskopien til `proxy_put` (serverens presignerte adresse; tom = ingen
     /// tilbudt). Gir størrelsen, eller None. En manglende kopi skal aldri velte selve opplastingen.
+    /// Kan kalles ETTER fullfør (F8), med en adresse fra `proxy-lenk-start`.
     fn avspillingskopi(&self, bare: &reqwest::Client, portal: &str, sti: &str, navn: &str, proxy_put: &str, bytes: u64) -> impl std::future::Future<Output = Option<u64>> + Send;
     /// Ble det ingen kopi: er det fordi fila er en video som ikke kan leses (ProRes RAW)? Da sendes
     /// `proxyUlesbar`, og fila meldes «utenProxy» i stedet for «ferdig».

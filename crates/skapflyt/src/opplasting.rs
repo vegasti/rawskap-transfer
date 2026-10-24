@@ -4,6 +4,10 @@
 // opptaksdato, kjent sjekksum, ny utgave (`versjonAv`) og ekstra felt, parallelle deler med xxh64 i rekkefølge, `Opplastet`
 // med fil-id-en, `proxyKey` fra serverens tilbud, tilstand v2 og `uferdige()`. Transfer bruker én del om gangen og
 // sender det samme som før.
+//
+// F8 (0.2.1): proxy-adressen i tilbudet lever 7200 s. Er den eldre enn PROXY_FERSK_MS når originalen er oppe
+// (gjenopptak dagen etter, eller en fil som tar over to timer), sendes ingen PUT dit: fullfør går uten kopien, og den
+// lenkes etterpå med en fersk adresse (`proxy-lenk-start` → avspillingskopi → `proxy-lenk-fullfor`).
 use crate::feil::disk;
 use crate::{forbigaaende, mappe_json, med_stoppvakt, meld, mime_fra, nettfeil, pause_foer_forsok, portal_post, sov, vent_paa_nett, Etterarbeid, Feil, Framdrift, Klient, Melder, OppFil, Stopp, Struper, DEL_FORSOK, ENKEL_FORSOK};
 use futures_util::StreamExt;
@@ -34,6 +38,18 @@ pub const MAKS_DELER: u64 = 9_000;
 pub const I_LUFTA: u64 = 256 * 1024 * 1024;
 /// Versjonen tilstandsfilene skrives med. Filer uten `versjon` er v1 (før T2) og leses fortsatt.
 pub const TILSTAND_VERSJON: u32 = 2;
+/// Så gammel kan proxy-adressen fra tilbudet være når avspillingskopien skal opp (F8). Serveren signerer den for
+/// 7200 s; de 20 minuttene som er igjen, er marginen for at selve PUT-en av kopien tar tid.
+pub const PROXY_FERSK_MS: u64 = 100 * 60 * 1000;
+
+/// Klokka i ms siden epoch (0 hvis den står før 1970 — da regnes en adresse som gammel).
+fn naa_ms() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0) }
+
+/// Kan proxy-adressen som ble mottatt `proxy_tid`, brukes `naa`? (F8)
+///
+/// 0 = ukjent alder (tilstand fra før feltet fantes) og regnes som gammel. En tid langt FRAM i tid (klokka ble stilt
+/// tilbake etter tilbudet) er like ukjent, derfor avstanden begge veier.
+pub fn proxy_fersk(proxy_tid: u64, naa: u64) -> bool { proxy_tid > 0 && naa.abs_diff(proxy_tid) < PROXY_FERSK_MS }
 
 /// Delstørrelse for en NY opplasting (0.3.0).
 ///
@@ -144,8 +160,8 @@ pub struct Uferdig {
 /// Tilstanden til én opplasting.
 ///
 /// v2 (T2): `{ versjon: 2, sti, navn, mappe_id, bytes, sist_endret, upload_id, original_key, del_bytes, deler, proxy_put,
-/// proxy_key, satt_sammen, xxh64 }` i `xxh64(sti|bytes|mtime_ms|mappe).json` — samme fil til to mapper deler ikke lenger
-/// tilstand (F6). v1 (før T2: ingen `versjon`, nøkkel uten mappe, `del_bytes` 0 = 64 MiB) leses fortsatt og flyttes til
+/// proxy_key, proxy_tid, satt_sammen, xxh64 }` i `xxh64(sti|bytes|mtime_ms|mappe).json` — samme fil til to mapper deler
+/// ikke lenger tilstand (F6). `proxy_tid` (F8, 0.2.1) mangler i filer skrevet før, og leses da som 0. v1 (før T2: ingen `versjon`, nøkkel uten mappe, `del_bytes` 0 = 64 MiB) leses fortsatt og flyttes til
 /// v2 første gang, så opplastinger som er i gang hos kunder, overlever oppdateringen.
 ///
 /// `satt_sammen` = bytene ligger hele i lageret (enkel PUT ferdig, eller multiparten satt sammen); bare avspillingskopi og
@@ -171,6 +187,10 @@ pub struct Resume {
     #[serde(default)] pub del_bytes: u64,
     /// Serverens proxy-nøkkel fra tilbudet (F7). Tom i v1 — da bygges den som før.
     #[serde(default)] pub proxy_key: String,
+    /// Da `proxy_put` ble mottatt, i ms siden epoch (F8, 0.2.1). Adressen lever 7200 s; er den eldre enn
+    /// PROXY_FERSK_MS når kopien skal opp, lenkes kopien etter fullfør i stedet. 0 = ukjent alder (skrevet før feltet
+    /// fantes) og regnes som gammel.
+    #[serde(default)] pub proxy_tid: u64,
     #[serde(default)] pub satt_sammen: bool,
     /// Sjekksummen regnet i kjøringen som satte sammen fila (tom = ukjent).
     #[serde(default)] pub xxh64: String,
@@ -346,8 +366,56 @@ pub async fn last_opp<K: Melder + Etterarbeid>(app: &K, k: &Klient, fil: &Fil, v
     } else {
         last_opp_enkel(&lop).await?
     };
-    let proxy = app.avspillingskopi(k.opp(), k.portal(), &lop.id, &fil.navn, &r.proxy_put, bytes).await;
-    fullfor_opplasting(&lop, &r, xxh, proxy).await
+    // ⚠ F8: tilbudets adresse lever 7200 s. Ble den gitt for lenge siden (gjenopptak dagen etter, eller 100 GB på
+    // 93 Mbit/s ≈ 2,4 t), ville PUT-en feilet, og fila fått plakat, men aldri noen avspillingskopi: med plakaten i fullfør
+    // starter ikke serveren Stream heller. Da sendes ingenting til den gamle adressen; kopien lenkes etter fullfør.
+    let gammel = !r.proxy_put.is_empty() && !proxy_fersk(r.proxy_tid, naa_ms());
+    let proxy = if gammel {
+        let alder = if r.proxy_tid == 0 { "ukjent alder".to_string() } else { format!("{} min", naa_ms().saturating_sub(r.proxy_tid) / 60_000) };
+        log::info!("{}: proxy-adressen fra tilbudet er for gammel ({alder}) — avspillingskopien lenkes med en ny adresse etter fullfør", fil.navn);
+        None
+    } else {
+        app.avspillingskopi(k.opp(), k.portal(), &lop.id, &fil.navn, &r.proxy_put, bytes).await
+    };
+    let (ut, mut status) = fullfor_opplasting(&lop, &r, xxh, proxy).await?;
+    if gammel {
+        if ut.allerede {
+            log::info!("{}: fila fantes i skapet fra før — ingen avspillingskopi å lenke", fil.navn);
+        } else if ut.id.is_empty() {
+            log::warn!("{}: fullfør ga ingen fil-id — avspillingskopien kan lenkes for hånd", fil.navn);
+        } else {
+            // Best effort: opplastingen ER ferdig. En feil her logges, og kopien kan lenkes for hånd («Lenk lokal proxy …»).
+            match lenk_avspillingskopi(&lop, &ut.id).await {
+                Ok(n) => {
+                    log::info!("{}: avspillingskopien er lenket ({n} B)", fil.navn);
+                    // Det finnes en kopi likevel (en lokal proxy til en fil som ikke kan leses): som når adressen er fersk.
+                    if status == "utenProxy" { status = "ferdig"; }
+                }
+                Err(e) => log::warn!("{}: fikk ikke lenket avspillingskopien ({e}) — fila er i skapet, og kopien kan lenkes for hånd", fil.navn),
+            }
+        }
+    }
+    // Sluttstatusen først NÅ, så en fil som er meldt ferdig, ikke går tilbake til «proxy» mens kopien lenkes.
+    let _ = app.framdrift(Framdrift { id: lop.id.clone(), hentet: bytes, total: bytes, status: status.into(), feil: None });
+    Ok(ut)
+}
+
+/// F8: avspillingskopien til en fil som ALT er i skapet, med en fersk adresse — samme to kall som «Lenk lokal proxy …»
+/// i Transfer. Nøkkelen er serverens egen (`proxyNokkel` av raden), så bare id-en og størrelsen sendes. Gir størrelsen.
+async fn lenk_avspillingskopi<K: Melder + Etterarbeid>(lop: &Lop<'_, K>, id: &str) -> Result<u64, String> {
+    let (app, k, fil, bytes) = (lop.app, lop.k, lop.fil, lop.bytes);
+    // ⚠ Adressen er skrive-legitimasjon: den skal aldri ut i en feiltekst eller loggen (nettfeil stripper URL-er).
+    let (st, d) = portal_post(k, &serde_json::json!({ "action": "proxy-lenk-start", "id": id }), Some(lop.avbryt)).await.map_err(|e| e.to_string())?;
+    let put = match d["proxyPutUrl"].as_str() {
+        Some(u) if (200..300).contains(&st) && !u.is_empty() => u.to_string(),
+        _ => return Err(format!("proxy-lenk-start: {}", d["error"].as_str().map(String::from).unwrap_or_else(|| format!("Portalen svarte {st}")))),
+    };
+    let n = app.avspillingskopi(k.opp(), k.portal(), &lop.id, &fil.navn, &put, bytes).await.ok_or("ble ingen avspillingskopi")?;
+    let (st, d) = portal_post(k, &serde_json::json!({ "action": "proxy-lenk-fullfor", "id": id, "proxyStorrelse": n }), Some(lop.avbryt)).await.map_err(|e| e.to_string())?;
+    if !(200..300).contains(&st) || !d["ok"].as_bool().unwrap_or(false) {
+        return Err(format!("proxy-lenk-fullfor: {}", d["error"].as_str().map(String::from).unwrap_or_else(|| format!("Portalen svarte {st}"))));
+    }
+    Ok(n)
 }
 
 /// Svaret fra presign/multipart-start når `versjonAv` er avvist FØR bytene går: ingenting er laget hos serveren.
@@ -384,12 +452,14 @@ async fn multipart_start<K: Melder>(lop: &Lop<'_, K>) -> Result<Resume, Feil> {
         }
     };
     // Serveren tilbyr en presignert URL for avspillingsproxyen (kun video), og nøkkelen den skal ha (F7).
-    // Begge lagres i resume-fila så en gjenopptatt opplasting ikke mister dem.
+    // Begge lagres i resume-fila så en gjenopptatt opplasting ikke mister dem — og når adressen kom (F8): den lever 7200 s.
+    let proxy_put = d["proxyPutUrl"].as_str().unwrap_or("").to_string();
+    let proxy_tid = if proxy_put.is_empty() { 0 } else { naa_ms() };
     Ok(Resume {
         versjon: TILSTAND_VERSJON, sti: lop.id.clone(), navn: fil.navn.clone(), upload_id: uid, original_key: key,
         mappe_id: fil.mappe_id.clone(), bytes: lop.bytes, sist_endret: lop.mtime, deler: vec![],
-        proxy_put: d["proxyPutUrl"].as_str().unwrap_or("").to_string(), del_bytes: del,
-        proxy_key: d["proxyKey"].as_str().unwrap_or("").to_string(), satt_sammen: false, xxh64: String::new(),
+        proxy_put, del_bytes: del,
+        proxy_key: d["proxyKey"].as_str().unwrap_or("").to_string(), proxy_tid, satt_sammen: false, xxh64: String::new(),
     })
 }
 
@@ -779,6 +849,8 @@ async fn last_opp_enkel<K: Melder>(lop: &Lop<'_, K>) -> Result<(Resume, Option<S
     let (url, key) = match (d["uploadUrl"].as_str(), d["originalKey"].as_str()) { (Some(u), Some(k)) => (u.to_string(), k.to_string()), _ => return Err(Feil::server(st, d["error"].as_str().unwrap_or("presign feilet"))) };
     let proxy_put = d["proxyPutUrl"].as_str().unwrap_or("").to_string();
     let proxy_key = d["proxyKey"].as_str().unwrap_or("").to_string();
+    // F8: da tilbudet kom — ikke da PUT-en var ferdig. Adressen lever 7200 s fra signeringen.
+    let proxy_tid = if proxy_put.is_empty() { 0 } else { naa_ms() };
     // 2) PUT rett til R2 m/ framdrift — og med omforsøk (0.3.0).
     //
     // URL-en lever et kvarter, så et nytt forsøk trenger ingen ny signering. Hvert forsøk leser fila
@@ -831,7 +903,7 @@ async fn last_opp_enkel<K: Melder>(lop: &Lop<'_, K>) -> Result<(Resume, Option<S
     let r = Resume {
         versjon: TILSTAND_VERSJON, sti: lop.id.clone(), navn: navn.to_string(), upload_id: String::new(), original_key: key,
         mappe_id: fil.mappe_id.clone(), bytes, sist_endret: lop.mtime, deler: vec![], proxy_put, del_bytes: 0, proxy_key,
-        satt_sammen: true, xxh64: xxh.clone().unwrap_or_default(),
+        proxy_tid, satt_sammen: true, xxh64: xxh.clone().unwrap_or_default(),
     };
     resume_skriv(&lop.tsti, &r);
     Ok((r, xxh))
@@ -849,7 +921,10 @@ fn proxy_nokkel_reserve(key: &str) -> String {
 }
 
 /// Fullfør-steget (server: thumb/EXIF/dedup for bilder; video: poster/sprite fra appens etterarbeid).
-async fn fullfor_opplasting<K: Melder + Etterarbeid>(lop: &Lop<'_, K>, r: &Resume, xxh: Option<String>, proxy: Option<u64>) -> Result<Opplastet, Feil> {
+///
+/// Gir fila og sluttstatusen («ferdig», «utenProxy», «hoppet»). Den meldes av `last_opp` (F8: etter en ev. lenking av
+/// avspillingskopien; ellers rett etter, som før).
+async fn fullfor_opplasting<K: Melder + Etterarbeid>(lop: &Lop<'_, K>, r: &Resume, xxh: Option<String>, proxy: Option<u64>) -> Result<(Opplastet, &'static str), Feil> {
     let (app, k, fil, bytes) = (lop.app, lop.k, lop.fil, lop.bytes);
     let (navn, key) = (fil.navn.as_str(), r.original_key.as_str());
     let mut body = serde_json::json!({ "action": "fullfor", "originalKey": key, "filnavn": navn, "mimeType": fil.mime, "filstorrelse": bytes, "sistEndret": lop.sist, "mappeId": mappe_json(&fil.mappe_id) });
@@ -908,14 +983,13 @@ async fn fullfor_opplasting<K: Melder + Etterarbeid>(lop: &Lop<'_, K>, r: &Resum
     let allerede = d["allerede"].as_bool().unwrap_or(false);
     let status = if allerede { "hoppet" }
         else if uten_proxy { "utenProxy" } else { "ferdig" };
-    let _ = app.framdrift(Framdrift { id: lop.id.clone(), hentet: bytes, total: bytes, status: status.into(), feil: None });
-    Ok(Opplastet {
+    Ok((Opplastet {
         id: d["id"].as_str().unwrap_or("").to_string(),
         allerede,
         original_key: key.to_string(),
         xxh64: xxh,
         versjon_av: d["versjonAv"].as_str().filter(|v| !v.is_empty()).map(String::from),
-    })
+    }, status))
 }
 
 /// Nei på `versjonAv` ved fullfør (P1-kontrakten, portal ea77e32a):
