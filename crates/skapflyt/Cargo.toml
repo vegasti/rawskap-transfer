@@ -1,0 +1,30 @@
+[package]
+name = "skapflyt"
+version = "0.1.0"
+description = "Overføringsmotoren fra Rawskap Transfer: nett, opplasting med gjenopptak, nedlasting, kobling, mapper og delinger mot Rawskap"
+authors = ["Raw Studios AS"]
+license = "MIT"
+repository = "https://github.com/vegasti/rawskap-transfer"
+edition = "2021"
+rust-version = "1.77.2"
+
+# ⚠ FRITTSTÅENDE PAKKE, IKKE ET WORKSPACE. Transfer-roten skal ikke bli et workspace: da flytter
+# `target/` seg fra src-tauri/target, og stiene i bygg.yml, rust-cachen og README brekker.
+# Transfer bruker craten med `path = "../crates/skapflyt"`.
+
+[features]
+# Den falske portalen og lageret (Mock/Lager/Uhell) som testene kjører nett-løypa mot. Egen feature
+# så andre som bruker craten (rawMotion) kan teste mot den samme. Cratens egne tester har den alltid.
+testportal = []
+
+# Samme versjoner som src-tauri/Cargo.toml, så appen og craten deler ett avhengighetstre.
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+bytes = "1"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+dirs = "6"
