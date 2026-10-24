@@ -1,4 +1,5 @@
 // Klientene, takene, omforsøkene og stoppvakten — alt nettet i craten går gjennom dette.
+use crate::Feil;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -50,29 +51,49 @@ impl Struper {
     }
 }
 
-/// Klienten for portal-kall med nøkkelen.
-///
-/// ⚠ `ua` er appens User-Agent («RawskapTransfer/0.3.7») og MÅ komme fra appen: et
-/// `env!("CARGO_PKG_VERSION")` her ville gitt cratens versjon, og portalloggene hadde vist feil app.
-pub fn klient(nokkel: &str, ua: &'static str) -> Result<reqwest::Client, String> {
-    let mut h = reqwest::header::HeaderMap::new();
-    // API-nøkkel (rsk_live_…) = Bearer; app-nøkkel (signert sesjon) = cookie.
-    if nokkel.starts_with("rsk_live_") {
-        h.insert(reqwest::header::AUTHORIZATION, format!("Bearer {}", nokkel).parse().map_err(|e| format!("{e}"))?);
-    } else {
-        let cookie = format!("kunde_sesjon={}", nokkel);
-        h.insert(reqwest::header::COOKIE, cookie.parse().map_err(|e| format!("{e}"))?);
+/// En tilkoblet konto: portalen og nøkkelen (app-nøkkel = cookien `kunde_sesjon`, API-nøkkel `rsk_live_…` = Bearer).
+#[derive(Clone, Debug)]
+pub struct Konto { pub portal: String, pub nokkel: String }
+
+/// Klientene mot skapet (T2): portal-klienten med nøkkelen og appens User-Agent, PUT-klienten rett til lageret og
+/// GET-klienten fra lageret — med Transfers tak. Lag den én gang per jobb og send den rundt; den er billig å klone
+/// (reqwest deler tilkoblingene).
+#[derive(Clone)]
+pub struct Klient { portal: String, api: reqwest::Client, opp: reqwest::Client, ned: reqwest::Client }
+
+impl Klient {
+    /// ⚠ `ua` er appens User-Agent («RawskapTransfer/0.3.7») og MÅ komme fra appen: et
+    /// `env!("CARGO_PKG_VERSION")` her ville gitt cratens versjon, og portalloggene hadde vist feil app.
+    pub fn ny(konto: &Konto, ua: &str) -> Result<Klient, Feil> {
+        let mut h = reqwest::header::HeaderMap::new();
+        let nokkel = &konto.nokkel;
+        // API-nøkkel (rsk_live_…) = Bearer; app-nøkkel (signert sesjon) = cookie.
+        if nokkel.starts_with("rsk_live_") {
+            h.insert(reqwest::header::AUTHORIZATION, format!("Bearer {}", nokkel).parse().map_err(|e| Feil::IkkeTilgang(format!("{e}")))?);
+        } else {
+            let cookie = format!("kunde_sesjon={}", nokkel);
+            h.insert(reqwest::header::COOKIE, cookie.parse().map_err(|e| Feil::IkkeTilgang(format!("{e}")))?);
+        }
+        h.insert(reqwest::header::USER_AGENT, reqwest::header::HeaderValue::from_str(ua).map_err(|e| Feil::server(0, format!("{e}")))?);
+        let api = reqwest::Client::builder()
+            .default_headers(h)
+            .redirect(reqwest::redirect::Policy::none()) // vi følger 302 selv (uten cookie)
+            .connect_timeout(TILKOBLING_TAK)
+            // Portal-kall og nedlasting via portalen. Lese-taket nullstilles for hver bit av SVARET, så
+            // lange nedlastinger er trygge. Det brukes IKKE på opplastings-klienten — se bare_opp.
+            .read_timeout(PORTAL_LESE_TAK)
+            .build()
+            .map_err(|e| Feil::Nett(nettfeil(e)))?;
+        Ok(Klient { portal: konto.portal.trim_end_matches('/').to_string(), api, opp: bare_opp(), ned: bare_ned() })
     }
-    h.insert(reqwest::header::USER_AGENT, reqwest::header::HeaderValue::from_static(ua));
-    reqwest::Client::builder()
-        .default_headers(h)
-        .redirect(reqwest::redirect::Policy::none()) // vi følger 302 selv (uten cookie)
-        .connect_timeout(TILKOBLING_TAK)
-        // Portal-kall og nedlasting via portalen. Lese-taket nullstilles for hver bit av SVARET, så
-        // lange nedlastinger er trygge. Det brukes IKKE på opplastings-klienten — se bare_opp.
-        .read_timeout(PORTAL_LESE_TAK)
-        .build()
-        .map_err(nettfeil)
+    /// Portalens adresse, uten skråstrek til slutt.
+    pub fn portal(&self) -> &str { &self.portal }
+    /// Portal-klienten: nøkkelen og User-Agent, ingen omdirigering, tak på tilkobling og lesing.
+    pub fn api(&self) -> &reqwest::Client { &self.api }
+    /// PUT rett til lageret (se `bare_opp`).
+    pub fn opp(&self) -> &reqwest::Client { &self.opp }
+    /// GET fra lageret (se `bare_ned`).
+    pub fn ned(&self) -> &reqwest::Client { &self.ned }
 }
 
 // ── NETT SOM TÅLER VIRKELIGHETEN (0.3.0) ─────────────────────────────────────────────────────
@@ -188,21 +209,22 @@ pub async fn vent_paa_nett(portal: &str, avbryt: Option<&Stopp>, meld_venter: &(
 /// Nettfeil og forbigående serverfeil (5xx, 429) prøves igjen, og er nettet borte, ventes det ut.
 /// Alle andre svar — også 4xx — er et SVAR og går rett tilbake som (status, json); det er kallerens
 /// sak å tolke dem. Før 0.3.0 ga ett hikk under signeringen av neste bolk opp hele fila.
-pub async fn portal_post(k: &reqwest::Client, portal: &str, body: &serde_json::Value, avbryt: Option<&Stopp>) -> Result<(u16, serde_json::Value), String> {
+pub async fn portal_post(k: &Klient, body: &serde_json::Value, avbryt: Option<&Stopp>) -> Result<(u16, serde_json::Value), Feil> {
+    let portal = k.portal();
     let url = format!("{portal}/api/rawskap/opplasting");
     let handling = body["action"].as_str().unwrap_or("?");
     let mut n = 0u32;
     loop {
-        let feil = match k.post(&url).json(body).send().await {
+        let feil = match k.api().post(&url).json(body).send().await {
             Ok(r) => {
                 let st = r.status().as_u16();
                 // Siste forsøk: gi kalleren svaret likevel, så serverens egen feiltekst når fram.
                 if !forbigaaende(st) || n + 1 >= PORTAL_FORSOK { return Ok((st, r.json().await.unwrap_or(serde_json::Value::Null))); }
-                format!("Portalen svarte {st}")
+                Feil::server(st, format!("Portalen svarte {st}"))
             }
-            Err(e) => nettfeil(e),
+            Err(e) => Feil::Nett(nettfeil(e)),
         };
-        if avbryt.map(|a| a.av()).unwrap_or(false) { return Err("Avbrutt".into()); }
+        if avbryt.map(|a| a.av()).unwrap_or(false) { return Err(Feil::Avbrutt); }
         if n + 1 >= PORTAL_FORSOK { return Err(feil); }
         log::warn!("{handling} feilet ({feil}) — prøver igjen");
         vent_paa_nett(portal, avbryt, &|| {}).await;
@@ -213,9 +235,9 @@ pub async fn portal_post(k: &reqwest::Client, portal: &str, body: &serde_json::V
 
 /// Be serveren glemme opplastinger vi gir opp: pending-raden, multiparten og et halvt objekt.
 /// Best-effort — feiekosten tar resten om dette ikke når fram.
-pub async fn forkast_nokler(k: &reqwest::Client, portal: &str, nokler: &[String]) {
+pub async fn forkast_nokler(k: &Klient, nokler: &[String]) {
     if nokler.is_empty() { return; }
-    let _ = k.post(format!("{portal}/api/rawskap/opplasting")).json(&serde_json::json!({ "action": "avbryt", "originalKeys": nokler })).send().await;
+    let _ = k.api().post(format!("{}/api/rawskap/opplasting", k.portal())).json(&serde_json::json!({ "action": "avbryt", "originalKeys": nokler })).send().await;
 }
 
 /// Nettverksfeil UTEN URL-en.

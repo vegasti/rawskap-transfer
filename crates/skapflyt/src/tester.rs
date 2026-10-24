@@ -3,9 +3,12 @@
 // logikk som så åpenbart riktig ut ved lesing — så dekningen starter på det som faktisk ØDELEGGER
 // DATA hvis det er galt, ikke på det som er lett å teste.
 // (S1: nett- og opplastingstestene flyttet hit fra src-tauri/src/lib.rs sammen med koden.)
+// (T2: Klient/Feil/Valg, og nye tester for parallelle deler, Kilde, versjonAv, tilstand v1 → v2, proxyKey og uferdige.)
 //   cargo test --manifest-path crates/skapflyt/Cargo.toml --all-features
+use crate::opplasting::{Fil as OppTil, Kilde};
 use crate::testportal::*;
 use crate::*;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -114,23 +117,59 @@ fn nettfeil_viser_aldri_url() {
     assert!(!tekst.contains("hemmelig") && !tekst.contains("127.0.0.1"), "{tekst}");
 }
 
+/// Feilene gir de samme tekstene som før de ble typet — grensesnittet viser dem og kjenner igjen DELING_LAAST.
+#[test]
+fn feiltekstene_er_som_foer() {
+    assert_eq!(Feil::Avbrutt.to_string(), "Avbrutt");
+    assert_eq!(Feil::DelingLaast(String::new()).to_string(), "DELING_LAAST");
+    assert_eq!(Feil::DelingLaast("passord".into()).to_string(), "DELING_LAAST:passord");
+    assert_eq!(String::from(Feil::server(404, "Portalen svarte 404")), "Portalen svarte 404");
+    // varig() = den gamle varig_nedlastingsfeil for alt nedlastingen gir.
+    for (e, varig) in [
+        (Feil::DelingLaast(String::new()), true),
+        (Feil::IkkeTilgang("Nøkkelen er ugyldig — lag en ny".into()), true),
+        (Feil::Sperret("Blokkert (samtykke trukket/utløpt)".into()), true),
+        (Feil::server(404, "Portalen svarte 404"), true),
+        (Feil::server(429, "Portalen svarte 429"), true),
+        (Feil::server(502, "Portalen svarte 502"), false),
+        (Feil::server(0, "302 uten Location"), false),
+        (Feil::Nett("Lageret svarte 403".into()), false),
+        (Feil::Disk("ingen plass".into()), false),
+    ] { assert_eq!(e.varig(), varig, "{e}"); }
+    assert!(!Feil::VersjonAv { kode: "midlertidig".into(), ryddet: false, id: None, tekst: String::new() }.varig());
+    assert!(Feil::VersjonAv { kode: "slettet".into(), ryddet: true, id: None, tekst: String::new() }.varig());
+}
+
 // ── MOT DEN FALSKE PORTALEN (testportal) ──
 
 fn testdata(n: usize, frø: u64) -> Vec<u8> {
     let mut x = frø.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     (0..n).map(|_| { x ^= x << 13; x ^= x >> 7; x ^= x << 17; (x >> 24) as u8 }).collect()
 }
-fn testfil(navn: &str, data: &[u8]) -> OppFil {
+fn testfil(navn: &str, data: &[u8]) -> PathBuf {
     let d = std::env::temp_dir().join("rawskap-transfer-test").join("filer");
     std::fs::create_dir_all(&d).unwrap();
     let p = d.join(navn);
     std::fs::write(&p, data).unwrap();
-    OppFil { sti: p.to_string_lossy().to_string(), relativ: navn.into(), bytes: data.len() as u64 }
+    p
 }
+fn oppfil(p: &Path) -> OppFil { OppFil { sti: p.to_string_lossy().to_string(), relativ: p.file_name().unwrap().to_string_lossy().to_string(), bytes: std::fs::metadata(p).unwrap().len() } }
 fn stopp(id: &str) -> Stopp { Stopp { global: Arc::new(AtomicBool::new(false)), sett: Arc::new(std::sync::Mutex::new(Default::default())), id: id.into() } }
 fn hash(d: &[u8]) -> String { format!("{:016x}", xxhash_rust::xxh64::xxh64(d, 0)) }
-fn mtime_ms(sti: &str) -> u64 { std::fs::metadata(sti).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 }
-fn ubegrenset() -> Arc<Struper> { Struper::ny(Arc::new(AtomicU64::new(0))) }
+fn mtime_ms(sti: &Path) -> u64 { std::fs::metadata(sti).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 }
+/// Hver test har sin egen tilstandsmappe (testene kjører samtidig, og `uferdige` ser på hele mappa).
+fn valg(navn: &str) -> Valg {
+    let d = std::env::temp_dir().join("rawskap-transfer-test").join("tilstand").join(navn);
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    Valg { tilstand_dir: d, ..Valg::default() }
+}
+fn klient(m: &Mock) -> Klient { Klient::ny(&Konto { portal: m.adr.clone(), nokkel: "test".into() }, UA).unwrap() }
+/// Tilstandsfila (v2) for en fil på disk.
+fn tilstand_for(v: &Valg, p: &Path, mappe: &str) -> PathBuf {
+    tilstand_sti(&v.tilstand_dir, &p.to_string_lossy(), std::fs::metadata(p).unwrap().len(), mtime_ms(p), mappe)
+}
+fn nokler(b: &serde_json::Value) -> Vec<String> { let mut k: Vec<String> = b.as_object().unwrap().keys().cloned().collect(); k.sort(); k }
 
 /// Stand-in for appen: framdrift går ingen steder, og etterarbeidet gjør ingenting (testfilene er
 /// ikke video).
@@ -143,6 +182,32 @@ impl Etterarbeid for Stille {
     fn avspillingskopi(&self, _bare: &reqwest::Client, _portal: &str, _sti: &str, _navn: &str, _proxy_put: &str, _bytes: u64) -> impl std::future::Future<Output = Option<u64>> + Send { async { None } }
     fn ulesbar_video(&self, _sti: &str, _navn: &str) -> impl std::future::Future<Output = bool> + Send { async { false } }
     fn videofelt(&self, _sti: &str, _navn: &str, _bytes: u64, _body: &mut serde_json::Value) -> impl std::future::Future<Output = ()> + Send { async {} }
+}
+
+/// En app som laster en ferdig avspillingskopi til adressen serveren tilbød — som Transfer gjør etter ffmpeg.
+#[derive(Clone)]
+struct MedProxy(PathBuf);
+impl Melder for MedProxy {
+    fn framdrift(&self, _f: Framdrift) {}
+}
+impl Etterarbeid for MedProxy {
+    fn avspillingskopi(&self, bare: &reqwest::Client, portal: &str, _sti: &str, _navn: &str, proxy_put: &str, _bytes: u64) -> impl std::future::Future<Output = Option<u64>> + Send {
+        let (b, p, u, f) = (bare.clone(), portal.to_string(), proxy_put.to_string(), self.0.clone());
+        async move { if u.is_empty() { return None; } put_proxy(&b, &p, &u, &f).await }
+    }
+    fn ulesbar_video(&self, _sti: &str, _navn: &str) -> impl std::future::Future<Output = bool> + Send { async { false } }
+    fn videofelt(&self, _sti: &str, _navn: &str, _bytes: u64, _body: &mut serde_json::Value) -> impl std::future::Future<Output = ()> + Send { async {} }
+}
+
+/// Bytene fra minnet — som rawMotions tar-arkiv, bare uten filer.
+struct Minne(Vec<u8>);
+impl Kilde for Minne {
+    fn lengde(&self) -> u64 { self.0.len() as u64 }
+    fn les(&self, start: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        let s = start as usize;
+        buf.copy_from_slice(&self.0[s..s + buf.len()]);
+        Ok(())
+    }
 }
 
 /// Kjører en asynkron test med korte pauser.
@@ -158,16 +223,17 @@ fn multipart_taaler_kutt_500_og_utlopt_signatur() {
     med_app(|app| async move {
         let m = start_mock().await;
         let data = testdata(40 << 20, 1);
-        let fil = testfil("mp-uhell.bin", &data);
+        let p = testfil("mp-uhell.bin", &data);
         {
             let mut l = m.lager.lock().unwrap();
             l.uhell.insert((1, 1), Uhell::Kutt(1 << 20));
             l.uhell.insert((2, 1), Uhell::Status(500));
             l.uhell.insert((3, 1), Uhell::Status(403));
         }
-        let k = klient("test", UA).unwrap();
-        let res = last_opp_en(&app, &k, &bare_opp(), &m.adr, &fil, "", &stopp(&fil.sti), ubegrenset()).await;
-        assert_eq!(res, Ok(()));
+        let v = valg("mp-uhell");
+        let res = last_opp(&app, &klient(&m), &OppTil::fra_sti(&p, ""), &v, &stopp("x")).await.unwrap();
+        assert!(res.id.starts_with("rec") && !res.allerede, "{res:?}");
+        assert_eq!(res.xxh64.as_deref(), Some(hash(&data).as_str()));
         let l = m.lager.lock().unwrap();
         assert!(l.objekt.as_deref() == Some(&data[..]), "fila som ble satt sammen er ikke lik originalen");
         assert_eq!((l.forsok(1), l.forsok(2), l.forsok(3)), (2, 2, 2));
@@ -176,6 +242,51 @@ fn multipart_taaler_kutt_500_og_utlopt_signatur() {
         assert_eq!(fullfor.len(), 1);
         assert_eq!(fullfor[0]["xxh64"].as_str(), Some(hash(&data).as_str()));
         assert_eq!(l.handlinger("multipart-start")[0]["delBytes"].as_u64(), Some(16 << 20));
+        assert!(!tilstand_for(&v, &p, "").exists(), "tilstanden skal ryddes når fila er i skapet");
+    });
+}
+
+/// Det Transfer sender, er det samme som før T2: ingen nye nøkler når de nye feltene står tomme.
+#[test]
+fn transfer_sender_samme_json_som_foer() {
+    med_app(|app| async move {
+        let m = start_mock().await;
+        let (liten, stor) = (testdata(1 << 20, 11), testdata(30 << 20, 12));
+        let (pl, ps) = (testfil("json-liten.bin", &liten), testfil("json-stor.dat", &stor));
+        let (k, v) = (klient(&m), valg("json"));
+        last_opp(&app, &k, &OppTil::fra_sti(&pl, ""), &v, &stopp("x")).await.unwrap();
+        last_opp(&app, &k, &OppTil::fra_sti(&ps, "m1"), &v, &stopp("x")).await.unwrap();
+        let l = m.lager.lock().unwrap();
+        assert_eq!(nokler(&l.handlinger("presign")[0]), ["action", "filnavn", "filstorrelse", "mappeId", "mimeType", "sistEndret"]);
+        assert_eq!(nokler(&l.handlinger("multipart-start")[0]), ["action", "delBytes", "filnavn", "filstorrelse", "mappeId", "mimeType", "sistEndret"]);
+        for f in l.handlinger("fullfor") {
+            assert_eq!(nokler(&f), ["action", "filnavn", "filstorrelse", "mappeId", "mimeType", "originalKey", "sistEndret", "xxh64"]);
+        }
+        assert_eq!(l.handlinger("fullfor")[1]["sistEndret"].as_u64(), Some(mtime_ms(&ps)), "sistEndret er filas mtime, som før");
+    });
+}
+
+/// Feltene rawMotion trenger: tags (presign/multipart-start og fullfør), opptaksdatoen som sistEndret, og ekstra felt
+/// til fullfør — som aldri overstyrer det craten selv setter.
+#[test]
+fn tags_opptaksdato_og_felt_sendes() {
+    med_app(|app| async move {
+        let m = start_mock().await;
+        let data = testdata(1 << 20, 13);
+        let p = testfil("felt.bin", &data);
+        let mut fil = OppTil::fra_sti(&p, "m1");
+        fil.tags = vec!["timelapse".into(), "Tromsø".into()];
+        fil.sist_endret_ms = Some(1_700_000_000_000);
+        fil.felt.insert("rawmotion".into(), serde_json::json!({ "bilder": 300 }));
+        fil.felt.insert("filnavn".into(), serde_json::json!("skal-ikke-vinne.bin"));
+        last_opp(&app, &klient(&m), &fil, &valg("felt"), &stopp("x")).await.unwrap();
+        let l = m.lager.lock().unwrap();
+        let (presign, fullfor) = (&l.handlinger("presign")[0], &l.handlinger("fullfor")[0]);
+        assert_eq!(presign["tags"], serde_json::json!(["timelapse", "Tromsø"]));
+        assert_eq!(fullfor["tags"], serde_json::json!(["timelapse", "Tromsø"]));
+        assert_eq!((presign["sistEndret"].as_u64(), fullfor["sistEndret"].as_u64()), (Some(1_700_000_000_000), Some(1_700_000_000_000)));
+        assert_eq!(fullfor["rawmotion"]["bilder"], 300);
+        assert_eq!(fullfor["filnavn"], "felt.bin", "ekstra felt overstyrer ikke cratens egne");
     });
 }
 
@@ -186,19 +297,19 @@ fn gjenopptak_bruker_lagerets_deler() {
     med_app(|app| async move {
         let m = start_mock().await;
         let data = testdata(40 << 20, 2);
-        let fil = testfil("mp-gjenoppta.bin", &data);
+        let p = testfil("mp-gjenoppta.bin", &data);
         let del = 16u64 << 20;
         {
             let mut l = m.lager.lock().unwrap();
             l.deler.insert(1, data[..del as usize].to_vec());
             l.deler.insert(2, data[del as usize..del as usize + 1000].to_vec());
             l.del_bytes = del;
+            l.paabegynt("originals/test.bin", "u9");
         }
-        let rsti = resume_sti(&fil.sti, fil.bytes, mtime_ms(&fil.sti));
-        resume_skriv(&rsti, &Resume { upload_id: "u1".into(), original_key: "originals/test.bin".into(), bytes: fil.bytes, del_bytes: del, ..Default::default() });
-        let k = klient("test", UA).unwrap();
-        let res = last_opp_en(&app, &k, &bare_opp(), &m.adr, &fil, "", &stopp(&fil.sti), ubegrenset()).await;
-        assert_eq!(res, Ok(()));
+        let v = valg("gjenoppta");
+        let rsti = tilstand_for(&v, &p, "");
+        resume_skriv(&rsti, &Resume { versjon: 2, sti: p.to_string_lossy().into(), upload_id: "u9".into(), original_key: "originals/test.bin".into(), bytes: data.len() as u64, sist_endret: mtime_ms(&p), del_bytes: del, ..Default::default() });
+        let res = last_opp(&app, &klient(&m), &OppTil::fra_sti(&p, ""), &v, &stopp("x")).await.unwrap();
         let l = m.lager.lock().unwrap();
         assert!(l.objekt.as_deref() == Some(&data[..]), "fila som ble satt sammen er ikke lik originalen");
         assert_eq!((l.forsok(1), l.forsok(2), l.forsok(3)), (0, 1, 1), "del 1 lå der alt; del 2 var halv");
@@ -206,7 +317,39 @@ fn gjenopptak_bruker_lagerets_deler() {
         assert_eq!(l.handlinger("multipart-status").len(), 1);
         // Gjenopptatt = vi har ikke sett hele fila i denne kjøringen, og da sendes ingen sjekksum.
         assert!(l.handlinger("fullfor")[0].get("xxh64").is_none());
+        assert_eq!(res.xxh64, None);
         assert!(!rsti.exists(), "resume-fila skal ryddes når fila er oppe");
+    });
+}
+
+/// ⚠ v1 (før T2) må overleve oppdateringen: en tilstandsfil under den gamle nøkkelen (uten mappe), UTEN `del_bytes`
+/// (= 64 MiB-deler), skal fortsettes med den gamle delstørrelsen og flyttes til v2.
+#[test]
+fn v1_tilstand_gjenopptas() {
+    med_app(|app| async move {
+        let m = start_mock().await;
+        let gammel = 64usize << 20;
+        let data = testdata(gammel + (6 << 20), 21);
+        let p = testfil("mp-v1.bin", &data);
+        {
+            let mut l = m.lager.lock().unwrap();
+            l.deler.insert(1, data[..gammel].to_vec());
+            l.del_bytes = 0; // pending-rader fra før delstørrelsen ble lagret
+            l.paabegynt("originals/test.bin", "u7");
+        }
+        let v = valg("v1");
+        let sti = p.to_string_lossy().to_string();
+        let v1 = tilstand_sti_v1(&v.tilstand_dir, &sti, data.len() as u64, mtime_ms(&p));
+        // Nøyaktig det Transfer 0.3.x skrev (før del_bytes fantes).
+        std::fs::write(&v1, format!(r#"{{"upload_id":"u7","original_key":"originals/test.bin","mappe_id":"","bytes":{},"deler":[[1,"e1-{gammel}"]],"proxy_put":""}}"#, data.len())).unwrap();
+        last_opp(&app, &klient(&m), &OppTil::fra_sti(&p, ""), &v, &stopp("x")).await.unwrap();
+        let l = m.lager.lock().unwrap();
+        assert!(l.objekt.as_deref() == Some(&data[..]), "fila som ble satt sammen er ikke lik originalen");
+        assert_eq!((l.forsok(1), l.forsok(2)), (0, 1), "del 1 (64 MiB) lå der; bare resten skal sendes");
+        assert!(l.handlinger("multipart-start").is_empty(), "skulle fortsatt v1-opplastingen");
+        assert_eq!(l.deler.get(&2).map(|d| d.len()), Some(6 << 20), "del 2 skal starte ved 64 MiB");
+        assert!(!v1.exists(), "v1-fila skal være flyttet");
+        assert!(!tilstand_for(&v, &p, "").exists(), "og v2-fila ryddet når fila er oppe");
     });
 }
 
@@ -217,12 +360,10 @@ fn glemt_opplasting_begynner_paa_nytt() {
     med_app(|app| async move {
         let m = start_mock().await;
         let data = testdata(30 << 20, 3);
-        let fil = testfil("mp-glemt.bin", &data);
-        let rsti = resume_sti(&fil.sti, fil.bytes, mtime_ms(&fil.sti));
-        resume_skriv(&rsti, &Resume { upload_id: "gammel".into(), original_key: "originals/gammel.bin".into(), bytes: fil.bytes, deler: vec![(1, "x".into())], del_bytes: 16 << 20, ..Default::default() });
-        let k = klient("test", UA).unwrap();
-        let res = last_opp_en(&app, &k, &bare_opp(), &m.adr, &fil, "", &stopp(&fil.sti), ubegrenset()).await;
-        assert_eq!(res, Ok(()));
+        let p = testfil("mp-glemt.bin", &data);
+        let v = valg("glemt");
+        resume_skriv(&tilstand_for(&v, &p, ""), &Resume { versjon: 2, sti: p.to_string_lossy().into(), upload_id: "gammel".into(), original_key: "originals/gammel.bin".into(), bytes: data.len() as u64, deler: vec![(1, "x".into())], del_bytes: 16 << 20, ..Default::default() });
+        last_opp(&app, &klient(&m), &OppTil::fra_sti(&p, ""), &v, &stopp("x")).await.unwrap();
         let l = m.lager.lock().unwrap();
         assert!(l.objekt.as_deref() == Some(&data[..]), "fila som ble satt sammen er ikke lik originalen");
         assert_eq!(l.handlinger("multipart-start").len(), 1);
@@ -237,21 +378,295 @@ fn enkel_put_taaler_doed_linje_og_kutt() {
     med_app(|app| async move {
         let m = start_mock().await;
         let data = testdata(5 << 20, 4);
-        let fil = testfil("enkel.bin", &data);
+        let p = testfil("enkel.bin", &data);
         {
             let mut l = m.lager.lock().unwrap();
             l.uhell.insert((0, 1), Uhell::Stopp(64 << 10));
             l.uhell.insert((0, 2), Uhell::Kutt(1 << 20));
         }
-        let k = klient("test", UA).unwrap();
         let start = std::time::Instant::now();
-        let res = last_opp_en(&app, &k, &bare_opp(), &m.adr, &fil, "", &stopp(&fil.sti), ubegrenset()).await;
-        assert_eq!(res, Ok(()));
+        let v = valg("enkel");
+        last_opp(&app, &klient(&m), &OppTil::fra_sti(&p, ""), &v, &stopp("x")).await.unwrap();
         let l = m.lager.lock().unwrap();
         assert_eq!(l.forsok(0), 3);
         assert!(l.objekt.as_deref() == Some(&data[..]), "fila er ikke lik originalen");
         assert_eq!(l.handlinger("fullfor")[0]["xxh64"].as_str(), Some(hash(&data).as_str()));
         assert!(start.elapsed() < std::time::Duration::from_secs(20), "stopp-vakta skal kutte den døde linja raskt ({:?})", start.elapsed());
+        assert!(!tilstand_for(&v, &p, "").exists());
+    });
+}
+
+/// Fire deler i lufta samtidig: fila skal bli bit for bit lik, sjekksummen riktig (delene leses og hashes i
+/// rekkefølge av ÉN leser), og hver del sendes én gang.
+#[test]
+fn parallelle_deler_gir_riktig_fil_og_xxh64() {
+    med_app(|app| async move {
+        let m = start_mock().await;
+        let data = testdata((100 << 20) + 12_345, 31);
+        let p = testfil("mp-parallell.bin", &data);
+        m.lager.lock().unwrap().put_pause_ms = 60;
+        let v = Valg { deler_samtidig: 4, ..valg("parallell") };
+        let res = last_opp(&app, &klient(&m), &OppTil::fra_sti(&p, ""), &v, &stopp("x")).await.unwrap();
+        let l = m.lager.lock().unwrap();
+        assert!(l.objekt.as_deref() == Some(&data[..]), "fila som ble satt sammen er ikke lik originalen");
+        assert_eq!(res.xxh64.as_deref(), Some(hash(&data).as_str()));
+        assert_eq!(l.handlinger("fullfor")[0]["xxh64"].as_str(), Some(hash(&data).as_str()));
+        assert!((1..=7).all(|nr| l.forsok(nr) == 1), "hver del én gang: {:?}", l.forsok);
+        assert!(l.maks_samtidige >= 2 && l.maks_samtidige <= 4, "deler i lufta samtidig: {}", l.maks_samtidige);
+    });
+}
+
+/// Fire deler i lufta, og kjøringen stopper (del 5 avvises). Neste kjøring fortsetter: bare det som mangler sendes, ingen
+/// ny multipart — og den kjente sjekksummen sendes selv om bytene ikke er lest i denne kjøringen (F3).
+#[test]
+fn parallelle_deler_gjenopptas_etter_brudd() {
+    med_app(|app| async move {
+        let m = start_mock().await;
+        let data = testdata(100 << 20, 32);
+        let p = testfil("mp-parallell-brudd.bin", &data);
+        {
+            let mut l = m.lager.lock().unwrap();
+            l.put_pause_ms = 30;
+            l.uhell.insert((5, 1), Uhell::Status(400));
+        }
+        let (k, v) = (klient(&m), Valg { deler_samtidig: 4, ..valg("parallell-brudd") });
+        let feil = last_opp(&app, &k, &OppTil::fra_sti(&p, ""), &v, &stopp("x")).await.unwrap_err();
+        assert!(matches!(&feil, Feil::Nett(t) if t.starts_with("Del 5 av 7 feilet (Lageret svarte 400)")), "{feil:?}");
+        let tilstand = resume_les(&tilstand_for(&v, &p, "")).expect("tilstanden skal stå etter et brudd");
+        assert!(!tilstand.deler.is_empty() && tilstand.deler.iter().all(|(nr, _)| *nr != 5), "bokføringen: {:?}", tilstand.deler);
+        let mut fil = OppTil::fra_sti(&p, "");
+        fil.kjent_xxh64 = Some(hash(&data));
+        let res = last_opp(&app, &k, &fil, &v, &stopp("x")).await.unwrap();
+        let l = m.lager.lock().unwrap();
+        assert!(l.objekt.as_deref() == Some(&data[..]), "fila som ble satt sammen er ikke lik originalen");
+        assert_eq!(l.handlinger("multipart-start").len(), 1, "andre kjøring fortsetter den samme opplastingen");
+        assert!((1..=7).filter(|nr| *nr != 5).all(|nr| l.forsok(nr) == 1), "ingen del sendes to ganger: {:?}", l.forsok);
+        assert_eq!(l.forsok(5), 2);
+        assert_eq!(l.handlinger("fullfor")[0]["xxh64"].as_str(), Some(hash(&data).as_str()), "den kjente sjekksummen");
+        assert_eq!(res.xxh64.as_deref(), Some(hash(&data).as_str()));
+    });
+}
+
+/// `Kilde`: bytene kommer ikke fra en fil (rawMotions tar-arkiv lages mens det leses). Både i deler (to i lufta) og i én
+/// PUT, uten at noe finnes på stien.
+#[test]
+fn kilde_lastes_opp_uten_fil() {
+    med_app(|app| async move {
+        let m = start_mock().await;
+        let k = klient(&m);
+        let ingen = std::env::temp_dir().join("rawskap-transfer-test").join("finnes-ikke");
+        let stor = testdata(40 << 20, 41);
+        let fil = OppTil { sti: ingen.join("serie.tar"), kilde: Some(Arc::new(Minne(stor.clone()))), navn: "serie.tar".into(), mime: "application/x-tar".into(), mappe_id: "m1".into(), sist_endret_ms: Some(1_690_000_000_000), ..Default::default() };
+        let v = Valg { del_grense: 0, deler_samtidig: 2, ..valg("kilde") };
+        let res = last_opp(&app, &k, &fil, &v, &stopp("x")).await.unwrap();
+        assert_eq!(res.xxh64.as_deref(), Some(hash(&stor).as_str()));
+        {
+            let l = m.lager.lock().unwrap();
+            assert!(l.objekt.as_deref() == Some(&stor[..]), "arkivet som ble satt sammen er ikke likt kilden");
+            assert_eq!(l.handlinger("multipart-start")[0]["sistEndret"].as_u64(), Some(1_690_000_000_000));
+        }
+        let liten = testdata(3 << 20, 42);
+        let fil = OppTil { sti: ingen.join("liten.bin"), kilde: Some(Arc::new(Minne(liten.clone()))), navn: "liten.bin".into(), mime: "application/octet-stream".into(), ..Default::default() };
+        let res = last_opp(&app, &k, &fil, &valg("kilde-enkel"), &stopp("y")).await.unwrap();
+        assert_eq!(res.xxh64.as_deref(), Some(hash(&liten).as_str()));
+        let l = m.lager.lock().unwrap();
+        assert!(l.objekt.as_deref() == Some(&liten[..]), "kilden i én PUT er ikke lik");
+    });
+}
+
+/// Ny utgave godtatt: versjonAv går med i forsjekken og fullfør (med utgavenotatet), og roten kommer tilbake.
+#[test]
+fn versjon_av_ok() {
+    med_app(|app| async move {
+        let m = start_mock().await;
+        let data = testdata(30 << 20, 51);
+        let p = testfil("utgave-ok.bin", &data);
+        m.lager.lock().unwrap().utgaver.insert("recMaal000000001".into(), TestUtgave::Ok { rot: "recRot0000000001".into() });
+        let mut fil = OppTil::fra_sti(&p, "");
+        fil.versjon_av = Some("recMaal000000001".into());
+        fil.utgavenotat = Some("Ny fremkalling".into());
+        let v = valg("utgave-ok");
+        let res = last_opp(&app, &klient(&m), &fil, &v, &stopp("x")).await.unwrap();
+        assert_eq!(res.versjon_av.as_deref(), Some("recRot0000000001"));
+        let l = m.lager.lock().unwrap();
+        assert_eq!(l.handlinger("multipart-start")[0]["versjonAv"], "recMaal000000001");
+        let f = &l.handlinger("fullfor")[0];
+        assert_eq!((f["versjonAv"].as_str(), f["utgavenotat"].as_str()), (Some("recMaal000000001"), Some("Ny fremkalling")));
+        assert!(!tilstand_for(&v, &p, "").exists());
+    });
+}
+
+/// Forsjekken sier nei FØR bytene går: ingen PUT, ingen fullfør.
+#[test]
+fn versjon_av_forsjekk_stopper_foer_bytene() {
+    med_app(|app| async move {
+        let m = start_mock().await;
+        let p = testfil("utgave-frosset.bin", &testdata(1 << 20, 52));
+        m.lager.lock().unwrap().utgaver.insert("recMaal000000002".into(), TestUtgave::Nei("frosset"));
+        let mut fil = OppTil::fra_sti(&p, "");
+        fil.versjon_av = Some("recMaal000000002".into());
+        let feil = last_opp(&app, &klient(&m), &fil, &valg("utgave-frosset"), &stopp("x")).await.unwrap_err();
+        assert!(matches!(&feil, Feil::VersjonAv { kode, id: None, .. } if kode == "frosset"), "{feil:?}");
+        assert!(feil.varig());
+        assert_eq!(feil.to_string(), "Fila ligger i fryseren — tin den før du laster opp en ny versjon");
+        let l = m.lager.lock().unwrap();
+        assert_eq!(l.forsok(0), 0, "ingen bytes skal ha gått");
+        assert!(l.handlinger("fullfor").is_empty());
+    });
+}
+
+/// Endelig nei ved fullfør der serveren har ryddet (`ryddet: true`): tilstanden slettes, og vi sier ikke avbryt selv.
+#[test]
+fn versjon_av_nei_med_ryddet_sletter_tilstanden() {
+    med_app(|app| async move {
+        let m = start_mock().await;
+        let p = testfil("utgave-slettet.bin", &testdata(30 << 20, 53));
+        m.lager.lock().unwrap().utgaver_fullfor.insert("recMaal000000003".into(), TestUtgave::Nei("slettet"));
+        let mut fil = OppTil::fra_sti(&p, "");
+        fil.versjon_av = Some("recMaal000000003".into());
+        let v = valg("utgave-slettet");
+        let feil = last_opp(&app, &klient(&m), &fil, &v, &stopp("x")).await.unwrap_err();
+        assert!(matches!(&feil, Feil::VersjonAv { kode, ryddet: true, id: None, .. } if kode == "slettet"), "{feil:?}");
+        assert!(!tilstand_for(&v, &p, "").exists(), "serveren har ryddet — da skal tilstanden bort");
+        let l = m.lager.lock().unwrap();
+        assert!(l.handlinger("avbryt").is_empty(), "serveren ryddet selv");
+        assert_eq!(l.ryddet, ["originals/test.bin"]);
+    });
+}
+
+/// `midlertidig` (503): alt står — tilstanden også. Neste forsøk fullfører SAMME opplasting uten å sende bytene igjen.
+#[test]
+fn versjon_av_midlertidig_lar_alt_staa() {
+    med_app(|app| async move {
+        let m = start_mock().await;
+        let data = testdata(30 << 20, 54);
+        let p = testfil("utgave-midlertidig.bin", &data);
+        m.lager.lock().unwrap().utgaver_fullfor.insert("recMaal000000004".into(), TestUtgave::Midlertidig);
+        let mut fil = OppTil::fra_sti(&p, "");
+        fil.versjon_av = Some("recMaal000000004".into());
+        let (k, v) = (klient(&m), valg("utgave-midlertidig"));
+        let feil = last_opp(&app, &k, &fil, &v, &stopp("x")).await.unwrap_err();
+        assert!(matches!(&feil, Feil::VersjonAv { kode, ryddet: false, .. } if kode == "midlertidig"), "{feil:?}");
+        assert!(!feil.varig());
+        let t = resume_les(&tilstand_for(&v, &p, "")).expect("tilstanden skal stå");
+        assert!(t.satt_sammen && t.xxh64 == hash(&data), "{t:?}");
+        let puts: u32 = { let l = m.lager.lock().unwrap(); assert!(l.handlinger("avbryt").is_empty()); l.forsok.values().sum() };
+        m.lager.lock().unwrap().utgaver_fullfor.clear();
+        let res = last_opp(&app, &k, &fil, &v, &stopp("x")).await.unwrap();
+        assert_eq!(res.versjon_av.as_deref(), Some("recMaal000000004"));
+        assert_eq!(res.xxh64.as_deref(), Some(hash(&data).as_str()), "sjekksummen fra kjøringen som sendte bytene");
+        let l = m.lager.lock().unwrap();
+        assert_eq!(l.forsok.values().sum::<u32>(), puts, "ingen bytes på nytt");
+        assert_eq!(l.handlinger("multipart-start").len(), 1);
+        assert_eq!(l.handlinger("fullfor").len(), 6, "fem forsøk (503 prøves igjen) og så det som lyktes");
+        assert!(!tilstand_for(&v, &p, "").exists());
+    });
+}
+
+/// Endelig nei uten `ryddet` (en portal fra før P1): klienten sier `avbryt` selv og sletter tilstanden. Med
+/// `ryddet: false` (ingenting ble fjernet hos serveren) er neiet like endelig, men da er ryddingen serverens sak.
+#[test]
+fn versjon_av_nei_uten_ryddet_kaller_avbryt() {
+    med_app(|app| async move {
+        // ryddet: false — ingen avbryt, men tilstanden går bort.
+        let m = start_mock().await;
+        let p = testfil("utgave-ryddet-false.bin", &testdata(2 << 20, 58));
+        {
+            let mut l = m.lager.lock().unwrap();
+            l.rydding_feiler = true;
+            l.utgaver_fullfor.insert("recMaal000000007".into(), TestUtgave::Nei("ukjent"));
+        }
+        let mut fil = OppTil::fra_sti(&p, "");
+        fil.versjon_av = Some("recMaal000000007".into());
+        let v = valg("utgave-ryddet-false");
+        let feil = last_opp(&app, &klient(&m), &fil, &v, &stopp("x")).await.unwrap_err();
+        assert!(matches!(&feil, Feil::VersjonAv { kode, ryddet: false, id: None, .. } if kode == "ukjent"), "{feil:?}");
+        assert!(feil.varig());
+        assert!(!tilstand_for(&v, &p, "").exists(), "endelig nei — tilstanden skal bort");
+        assert!(m.lager.lock().unwrap().handlinger("avbryt").is_empty(), "feltet ryddet finnes — ikke avbryt");
+
+        // Ingen ryddet i svaret (eldre portal): klienten sier avbryt.
+        let m = start_mock().await;
+        let p = testfil("utgave-eldre.bin", &testdata(2 << 20, 55));
+        {
+            let mut l = m.lager.lock().unwrap();
+            l.eldre_server = true;
+            l.utgaver_fullfor.insert("recMaal000000005".into(), TestUtgave::Nei("ukjent"));
+        }
+        let mut fil = OppTil::fra_sti(&p, "");
+        fil.versjon_av = Some("recMaal000000005".into());
+        let v = valg("utgave-eldre");
+        let feil = last_opp(&app, &klient(&m), &fil, &v, &stopp("x")).await.unwrap_err();
+        assert!(matches!(&feil, Feil::VersjonAv { kode, ryddet: true, id: None, .. } if kode == "ukjent"), "{feil:?}");
+        assert!(!tilstand_for(&v, &p, "").exists());
+        let l = m.lager.lock().unwrap();
+        assert_eq!(l.handlinger("avbryt")[0]["originalKeys"], serde_json::json!(["originals/test.bin"]));
+        assert_eq!(l.ryddet, ["originals/test.bin"]);
+    });
+}
+
+/// Feiekosten rakk å lage raden. Står den i en stakk, er jobben gjort (som `allerede`); står den alene, er det et
+/// endelig nei med `id` — bytene ER i skapet, så ingen `avbryt`, og tilstanden går bort.
+#[test]
+fn versjon_av_naar_feiekosten_alt_laget_raden() {
+    med_app(|app| async move {
+        let m = start_mock().await;
+        let k = klient(&m);
+        // Alene: nei med id.
+        let p = testfil("utgave-feiekost.bin", &testdata(2 << 20, 56));
+        m.lager.lock().unwrap().utgaver_fullfor.insert("recMaal000000006".into(), TestUtgave::Nei("slettet"));
+        m.lager.lock().unwrap().rader.insert("originals/test.bin".into(), Rad { id: "recFeiekost00001".into(), versjon_av: String::new() });
+        let mut fil = OppTil::fra_sti(&p, "");
+        fil.versjon_av = Some("recMaal000000006".into());
+        let v = valg("utgave-feiekost");
+        let feil = last_opp(&app, &k, &fil, &v, &stopp("x")).await.unwrap_err();
+        assert!(matches!(&feil, Feil::VersjonAv { ryddet: false, id: Some(i), .. } if i == "recFeiekost00001"), "{feil:?}");
+        assert!(!tilstand_for(&v, &p, "").exists());
+        assert!(m.lager.lock().unwrap().handlinger("avbryt").is_empty(), "bytene er i skapet — aldri avbryt");
+        // I en stakk: vellykket, som allerede.
+        let p = testfil("utgave-stakk.dat", &testdata(2 << 20, 57));
+        m.lager.lock().unwrap().rader.insert("originals/test.dat".into(), Rad { id: "recFeiekost00002".into(), versjon_av: "recRot0000000002".into() });
+        let mut fil = OppTil::fra_sti(&p, "");
+        fil.versjon_av = Some("recMaal000000006".into());
+        let res = last_opp(&app, &k, &fil, &valg("utgave-stakk"), &stopp("x")).await.unwrap();
+        assert_eq!((res.id.as_str(), res.allerede, res.versjon_av.as_deref()), ("recFeiekost00002", true, Some("recRot0000000002")));
+    });
+}
+
+/// F7: proxy-nøkkelen kommer fra serverens tilbud, ikke fra klientens egen oppskrift (her har serveren en annen
+/// konvensjon, og fullfør godtar bare sin egen).
+#[test]
+fn proxy_key_fra_tilbudet() {
+    med_app(|_app| async move {
+        let m = start_mock().await;
+        m.lager.lock().unwrap().proxy_prefiks = Some("proxy/v2/".into());
+        let p = testfil("film.mp4", &testdata(2 << 20, 61));
+        let proxy = testfil("film-proxy.mp4", &testdata(20_000, 62));
+        last_opp(&MedProxy(proxy), &klient(&m), &OppTil::fra_sti(&p, ""), &valg("proxy"), &stopp("x")).await.unwrap();
+        let l = m.lager.lock().unwrap();
+        let f = &l.handlinger("fullfor")[0];
+        assert_eq!(f["proxyKey"], "proxy/v2/test.mp4", "nøkkelen fra tilbudet, ikke proxy/test.mp4");
+        assert_eq!(f["proxyStorrelse"], 20_000);
+        assert_eq!(l.proxy_godtatt.as_deref(), Some("proxy/v2/test.mp4"));
+        assert_eq!(l.proxy.as_ref().map(|p| p.len()), Some(20_000));
+    });
+}
+
+/// F9: de påbegynte opplastingene står i tilstandsmappa med sti, navn, mappe og hvor mye som er sendt — så appen kan
+/// tilby «Fortsett» etter en omstart. Synk-minnet og v1-filer (uten sti) er ikke med.
+#[test]
+fn uferdige_lister_paabegynte() {
+    med_app(|app| async move {
+        let m = start_mock().await;
+        let data = testdata(40 << 20, 71);
+        let p = testfil("mp-uferdig.bin", &data);
+        m.lager.lock().unwrap().uhell.insert((2, 1), Uhell::Status(400));
+        let v = valg("uferdige");
+        std::fs::write(v.tilstand_dir.join("synk-abc.json"), "[]").unwrap();
+        std::fs::write(v.tilstand_dir.join("0123456789abcdef.json"), r#"{"upload_id":"u1","original_key":"originals/x.bin","mappe_id":"","bytes":1,"deler":[]}"#).unwrap();
+        assert!(last_opp(&app, &klient(&m), &OppTil::fra_sti(&p, "m1"), &v, &stopp("x")).await.is_err());
+        let u = uferdige(&v);
+        assert_eq!(u, vec![Uferdig { sti: p.clone(), navn: "mp-uferdig.bin".into(), mappe_id: "m1".into(), bytes: data.len() as u64, sendt: 16 << 20, sist_endret: mtime_ms(&p) }]);
     });
 }
 
@@ -270,8 +685,7 @@ fn nedlasting_fortsetter_etter_kutt() {
         let rot = std::env::temp_dir().join("rawskap-transfer-test").join("ned");
         let _ = std::fs::remove_dir_all(&rot);
         let fil = Fil { id: "a1".into(), filnavn: "ned.bin".into(), bytes: data.len() as u64, sti: String::new(), xxh64: hash(&data), url: String::new() };
-        let k = klient("test", UA).unwrap();
-        let res = last_ned_med_forsok(&app, &k, &bare_ned(), &m.adr, &fil, &rot, &stopp("a1"), &ubegrenset(), "hopp").await;
+        let res = last_ned_med_forsok(&app, &klient(&m), &fil, &rot, &stopp("a1"), &Struper::ny(Arc::new(AtomicU64::new(0))), "hopp").await;
         assert_eq!(res, Ok(()));
         assert!(std::fs::read(rot.join("ned.bin")).unwrap() == data, "nedlastet fil er ikke lik originalen");
         let l = m.lager.lock().unwrap();
@@ -279,19 +693,26 @@ fn nedlasting_fortsetter_etter_kutt() {
     });
 }
 
-/// «Fjern» i køen: serveren får beskjed om nøkkelen, og resume-fila forsvinner.
+/// «Fjern» i køen: serveren får beskjed om nøklene, og tilstandsfilene forsvinner — v2 (uansett mappe, køen vet ikke
+/// hvilken undermappe fila endte i) og v1 fra før T2.
 #[test]
 fn forkast_rydder_hos_serveren_og_lokalt() {
     med_app(|_app| async move {
         let m = start_mock().await;
         let data = testdata(1 << 20, 6);
-        let fil = testfil("forkast.bin", &data);
-        let rsti = resume_sti(&fil.sti, fil.bytes, mtime_ms(&fil.sti));
-        resume_skriv(&rsti, &Resume { upload_id: "u1".into(), original_key: "originals/forkast.bin".into(), bytes: fil.bytes, del_bytes: 16 << 20, ..Default::default() });
-        let n = forkast_opplasting(m.adr.clone(), "test".into(), vec![fil.clone()], UA).await;
-        assert_eq!(n, Ok(1));
-        assert!(!rsti.exists(), "resume-fila skal være borte");
+        let p = testfil("forkast.bin", &data);
+        let v = valg("forkast");
+        let (sti, len, mt) = (p.to_string_lossy().to_string(), data.len() as u64, mtime_ms(&p));
+        let p2 = tilstand_sti(&v.tilstand_dir, &sti, len, mt, "m1");
+        resume_skriv(&p2, &Resume { versjon: 2, sti: sti.clone(), upload_id: "u1".into(), original_key: "originals/forkast.bin".into(), mappe_id: "m1".into(), bytes: len, sist_endret: mt, del_bytes: 16 << 20, ..Default::default() });
+        let p1 = tilstand_sti_v1(&v.tilstand_dir, &sti, len, mt);
+        resume_skriv(&p1, &Resume { upload_id: "u0".into(), original_key: "originals/forkast-v1.bin".into(), bytes: len, ..Default::default() });
+        let n = forkast_opplasting(&klient(&m), &v, &[oppfil(&p)]).await;
+        assert_eq!(n, Ok(2));
+        assert!(!p2.exists() && !p1.exists(), "tilstandsfilene skal være borte");
         let l = m.lager.lock().unwrap();
-        assert_eq!(l.handlinger("avbryt")[0]["originalKeys"], serde_json::json!(["originals/forkast.bin"]));
+        let mut sendt: Vec<String> = serde_json::from_value(l.handlinger("avbryt")[0]["originalKeys"].clone()).unwrap();
+        sendt.sort();
+        assert_eq!(sendt, ["originals/forkast-v1.bin", "originals/forkast.bin"]);
     });
 }

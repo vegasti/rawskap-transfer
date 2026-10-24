@@ -9,12 +9,20 @@
 // grensesnittet. Appen kobler seg på gjennom to traits — `Melder` (framdrift) og `Etterarbeid`
 // (avspillingskopi og videofelt før fullfør).
 //
+// T2 (24/10): det rawMotion trenger — `Klient` (i stedet for ua-parameterne), typet `Feil`, `opplasting::Kilde`,
+// parallelle deler, `Opplastet` med fil-id-en, proxyKey fra serveren, ny utgave (versjonAv), `uferdige()` og tilstand v2.
+// Transfers oppførsel står: samme JSON (nye nøkler bare når de nye feltene er satt), samme tekster (`Feil` sin Display).
+//
+// ⚠ To typer heter Fil: `skapflyt::Fil` er en fil i SKAPET (nedlasting, som før), `skapflyt::opplasting::Fil` er en
+// fil som skal DIT.
+//
 // En metode som kaller seg selv, er en krasj ved første kall — aldri bare en advarsel. (0.3.0: en
 // regex-erstatning gjorde Kanal::framdrift rekursiv, og det var bare advarselen som fanget den.)
 #![deny(unconditional_recursion)]
 use serde::{Deserialize, Serialize};
 
 pub mod deling;
+pub mod feil;
 pub mod innlesing;
 pub mod navn;
 pub mod nedlasting;
@@ -28,9 +36,11 @@ pub mod testportal;
 mod tester;
 
 pub use deling::*;
+pub use feil::*;
 pub use navn::*;
 pub use nedlasting::*;
 pub use nett::*;
+// `opplasting::Fil` skygges her av nedlastingens `Fil` under — den nås som `skapflyt::opplasting::Fil`.
 pub use opplasting::*;
 pub use sjekksum::*;
 pub use skap::*;

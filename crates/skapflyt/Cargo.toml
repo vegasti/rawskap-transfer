@@ -1,6 +1,6 @@
 [package]
 name = "skapflyt"
-version = "0.1.0"
+version = "0.2.0"
 description = "Overføringsmotoren fra Rawskap Transfer: nett, opplasting med gjenopptak, nedlasting, kobling, mapper og delinger mot Rawskap"
 authors = ["Raw Studios AS"]
 license = "MIT"
