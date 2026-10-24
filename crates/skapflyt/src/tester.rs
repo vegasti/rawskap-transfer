@@ -853,7 +853,8 @@ fn lenking_som_feiler_velter_ikke_opplastingen() {
             assert!(l.handlinger("proxy-put").is_empty() && l.handlinger("proxy-lenk-fullfor").is_empty() && l.lenket.is_empty());
         }
         assert!(!tilstand_for(&v, &p, "").exists(), "fila er i skapet — tilstanden ryddes");
-        assert_eq!(app.statuser().last().map(String::as_str), Some("ferdig"));
+        // Uten kopi: «utenProxy» (høyreklikk for å lenke en proxy), ikke «ferdig».
+        assert_eq!(app.statuser().last().map(String::as_str), Some("utenProxy"));
 
         // Fila fantes fra før: ingen lenking.
         let m = start_mock().await;

@@ -391,7 +391,11 @@ pub async fn last_opp<K: Melder + Etterarbeid>(app: &K, k: &Klient, fil: &Fil, v
                     // Det finnes en kopi likevel (en lokal proxy til en fil som ikke kan leses): som når adressen er fersk.
                     if status == "utenProxy" { status = "ferdig"; }
                 }
-                Err(e) => log::warn!("{}: fikk ikke lenket avspillingskopien ({e}) — fila er i skapet, og kopien kan lenkes for hånd", fil.navn),
+                Err(e) => {
+                    log::warn!("{}: fikk ikke lenket avspillingskopien ({e}) — fila er i skapet, og kopien kan lenkes for hånd", fil.navn);
+                    // Vises som «uten avspillingskopi» (høyreklikk for å lenke en proxy), ikke som en ferdig fil med kopi.
+                    status = "utenProxy";
+                }
             }
         }
     }
