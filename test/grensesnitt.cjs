@@ -36,11 +36,19 @@ const MAPPER = [
 ];
 
 const STUBB = `<script>
+// Språket følger navigator.language. ?en=1: engelsk modus; ellers norsk, uansett hvilket språk maskinen har.
+{ const sprak = /[?&]en=1/.test(location.search) ? 'en-GB' : 'nb-NO'; Object.defineProperty(navigator, 'language', { get: () => sprak, configurable: true }); }
 window.__TAURI__ = (() => {
   const data = { mapper: ${JSON.stringify(MAPPER)}, filer: ${JSON.stringify(FILER)}, konto: { navn: 'Rigg' } };
   window.__kall = [];
+  // Lytterne tas vare på, så riggen kan sende hendelser selv: window.__send('framdrift', { … }).
+  const lyttere = {};
+  window.__send = (navn, payload) => (lyttere[navn] || []).forEach(cb => cb({ payload }));
   const invoke = async (cmd, args) => {
     window.__kall.push({ cmd, args });
+    // Feiltekstene (24/10): window.__avvis[cmd] er teksten kallet avvises med (som Rusts Err), window.__svar[cmd] svaret.
+    if (window.__avvis && Object.prototype.hasOwnProperty.call(window.__avvis, cmd)) throw window.__avvis[cmd];
+    if (window.__svar && Object.prototype.hasOwnProperty.call(window.__svar, cmd)) return window.__svar[cmd];
     if (cmd === 'hent_liste') return data;
     // To av seks mangler lokalt — det er det «N nye» skal telle.
     if (cmd === 'mangler_lokalt') return ['a3', 'b2'];
@@ -69,7 +77,7 @@ window.__TAURI__ = (() => {
     filer: [{ sti: 'C:/test/a.arw', relativ: 'a.arw', bytes: 30000000, filnavn: 'a.arw' }, { sti: 'C:/test/b.arw', relativ: 'b.arw', bytes: 30000000, filnavn: 'b.arw', hopp: true }] }]);
   return {
     core: { invoke },
-    event: { listen: async () => () => {} },
+    event: { listen: async (navn, cb) => { (lyttere[navn] = lyttere[navn] || []).push(cb); return () => {}; } },
     dialog: { open: async () => (window.__dialog || []).shift() ?? null },
     shell: { open: async () => {} },
     app: { getVersion: async () => '0.2.8' },
@@ -314,6 +322,87 @@ window.__TAURI__ = (() => {
     await send('Page.navigate', { url: 'file:///' + fil.replace(/\\/g, '/') + '?inn=1' });
     await sov(3000);
     sjekk('husket reservekopi vises ved oppstart', await ev(`(async () => { document.getElementById('vis-innlast').click(); await new Promise(r => setTimeout(r, 150)); return { paa: document.getElementById('inn-reserve-bryter').checked, sti: document.getElementById('inn-reserve-sti').textContent, synlig: !document.getElementById('inn-reserve-rad').classList.contains('skjult') }; })()`), { paa: true, sti: 'E:\\Reserve', synlig: true });
+
+    console.log('\n7d. Feiltekstene fra Rust på engelsk (24/10)');
+    // Rust skriver feilene på norsk. I engelsk modus gjør feilTekst dem om der de kommer inn: avviste kall, `feil` i
+    // jobbresultatene og `feil` i framdrift-hendelsene. Norsk modus: uendret. Ukjent tekst: uendret. Signalene koden
+    // sammenligner mot (Avbrutt, DELING_LAAST, DELING_LAAST:<lås>) skal virke som før i begge språk.
+    const FORVENT = {
+      no: {
+        enhet: ['Tidsavbrudd — prøv igjen', 'Fikk ikke gitt kopien navnet /Volumes/Arkiv/DSC0001.ARW: navnet er tatt', 'Del 3 av 9 feilet (Lageret svarte 503) — prøv igjen, den fortsetter fra del 3', '«RAW00001.ARW» finnes fra før'],
+        avvist: ['Fikk ikke kontakt — sjekk nettforbindelsen', 'Portalen svarte 503'],
+        laast: 'Delingen ble ikke åpnet fordi den er låst.',
+        jobb: { status: 'feil', feil: ['Nøkkelen er ugyldig — lag en ny', 'Ufullstendig: 10 av 20 bytes — prøv igjen (fortsetter der den slapp)'] },
+        fram: ['✕ Lageret svarte 503', '✕ Avbrutt'], fram2: ['✕ Delingen krever passord', '✕ Noe helt annet gikk galt'], avbruttOrd: 'avbrutt',
+      },
+      en: {
+        enhet: ['Timed out — try again', 'Could not give the copy the name /Volumes/Arkiv/DSC0001.ARW: the name is taken', 'Part 3 of 9 failed (Storage returned 503) — try again, it resumes from part 3', '“RAW00001.ARW” already exists'],
+        avvist: ['Could not connect — check your network connection', 'Rawskap returned 503'],
+        laast: 'The share was not opened because it is locked.',
+        jobb: { status: 'feil', feil: ['The key is invalid — create a new one', 'Incomplete: 10 of 20 bytes — try again (resumes where it left off)'] },
+        fram: ['✕ Storage returned 503', '✕ Cancelled'], fram2: ['✕ The share requires a password', '✕ Noe helt annet gikk galt'], avbruttOrd: 'cancelled',
+      },
+    };
+    for (const sprak of ['no', 'en']) {
+      await send('Page.navigate', { url: 'file:///' + fil.replace(/\\/g, '/') + (sprak === 'en' ? '?en=1' : '') });
+      await sov(3000);
+      const r = await ev(`(async () => {
+        const v = ms => new Promise(r => setTimeout(r, ms));
+        const $ = id => document.getElementById(id);
+        const F = window.__rawskapFeil.feilTekst;
+        const enhet = ['Tidsavbrudd — prøv igjen', 'Fikk ikke gitt kopien navnet /Volumes/Arkiv/DSC0001.ARW: navnet er tatt', 'Del 3 av 9 feilet (Lageret svarte 503) — prøv igjen, den fortsetter fra del 3', '«RAW00001.ARW» finnes fra før'].map(F);
+        const ukjent = 'Fila er i bruk av en annen prosess. (os error 32)';
+        const signaler = ['Avbrutt', 'DELING_LAAST', 'DELING_LAAST:passord'];
+        const urort = F(ukjent) === ukjent && signaler.every(s => F(s) === s);
+        // Avviste kall: «Åpne delingen» i overføringsvisningen viser feilen i linja nederst.
+        const apne = async tekst => { window.__avvis = { hent_deling: tekst }; $('deling-lenke2').value = 'abcdefgh'; $('apne-deling2').click(); await v(250); return $('overf-tekst').textContent; };
+        const avvist = [await apne('Fikk ikke kontakt — sjekk nettforbindelsen'), await apne('Portalen svarte 503')];
+        const ukjentAvvist = await apne('Delingen finnes ikke lenger');
+        // DELING_LAAST:inviterte → appen spør (egen prompt); Avbryt → «ikke åpnet fordi den er låst».
+        window.__avvis = { hent_deling: 'DELING_LAAST:inviterte' }; $('deling-lenke2').value = 'abcdefgh'; $('apne-deling2').click(); await v(250);
+        const spurt = $('prompt-bak').classList.contains('åpen');
+        $('prompt-avbryt').click(); await v(250);
+        const laast = $('overf-tekst').textContent;
+        window.__avvis = {};
+        // Jobbresultatet: «Følg mappa» i mappa laster ned de to som mangler (a3, b2), og Rust svarer med to feil.
+        document.querySelector('#filer .filrad.mappe').click(); await v(600);
+        window.__svar = { last_ned: { ok: 0, feil: [{ id: 'a3', feil: 'Nøkkelen er ugyldig — lag en ny' }, { id: 'b2', feil: 'Ufullstendig: 10 av 20 bytes — prøv igjen (fortsetter der den slapp)' }] } };
+        $('folg-mappe').click(); await v(900); $('folg-mappe').click(); await v(200);
+        const k1 = (window.__butikk.get('ko') || [])[0] || {};
+        const jobb = { status: k1.status, feil: (k1.feil || []).map(f => f.feil) };
+        // Framdrift-hendelser med feil for de to filene, så lista tegnet på nytt fra tilstanden.
+        const rad = id => (document.querySelector('#f-' + id + ' .status') || {}).textContent;
+        window.__send('framdrift', { id: 'a3', hentet: 0, total: 67000000, status: 'feil', feil: 'Lageret svarte 503' });
+        window.__send('framdrift', { id: 'b2', hentet: 0, total: 62000000, status: 'feil', feil: 'Avbrutt' });
+        await v(50);
+        const fram = [rad('a3'), rad('b2')];
+        window.__send('framdrift', { id: 'a3', hentet: 0, total: 67000000, status: 'feil', feil: 'DELING_LAAST' });
+        window.__send('framdrift', { id: 'b2', hentet: 0, total: 62000000, status: 'feil', feil: 'Noe helt annet gikk galt' });
+        await v(50);
+        const fram2 = [rad('a3'), rad('b2')];
+        $('rydd-ferdige').click(); await v(150);
+        const tegnet = [rad('a3'), rad('b2')];
+        // «Avbrutt» i jobbresultatet gjør jobben avbrutt (ikke feilet), i begge språk.
+        window.__svar = { last_ned: { ok: 1, feil: [{ id: 'a3', feil: 'Avbrutt' }] } };
+        $('folg-mappe').click(); await v(900); $('folg-mappe').click(); await v(200);
+        const k2 = (window.__butikk.get('ko') || [])[0] || {};
+        const avbrutt = { status: k2.status, feil: (k2.feil || []).map(f => f.feil), rad: (document.querySelector('#jb-' + k2.id + ' .st') || {}).textContent };
+        window.__svar = {};
+        return { enhet, urort, avvist, ukjentAvvist, spurt, laast, jobb, fram, fram2, tegnet, avbrutt };
+      })()`);
+      const f = FORVENT[sprak], s = sprak.toUpperCase();
+      if (r && r.__feil) { sjekk(`${s}: feiltekst-runden kjørte`, r.__feil, null); continue; }
+      sjekk(`${s}: feilTekst — eksakt, mønster med sti, innfelt feil, «navn»`, r.enhet, f.enhet);
+      sjekk(`${s}: ukjent tekst og signalene står urørt`, r.urort, true);
+      sjekk(`${s}: avvist kall vises på riktig språk`, r.avvist, f.avvist);
+      sjekk(`${s}: avvist kall med ukjent tekst vises uendret`, r.ukjentAvvist, 'Delingen finnes ikke lenger');
+      sjekk(`${s}: DELING_LAAST:inviterte gjenkjennes fortsatt (spør, så «låst»)`, [r.spurt, r.laast], [true, f.laast]);
+      sjekk(`${s}: feil i jobbresultatet`, r.jobb, f.jobb);
+      sjekk(`${s}: feil i framdrift-hendelser (og Avbrutt)`, r.fram, f.fram);
+      sjekk(`${s}: DELING_LAAST og ukjent tekst i framdrift`, r.fram2, f.fram2);
+      sjekk(`${s}: samme tekst når lista tegnes på nytt`, r.tegnet, f.fram2);
+      sjekk(`${s}: Avbrutt i jobbresultatet gir avbrutt jobb`, [r.avbrutt.status, r.avbrutt.feil, (r.avbrutt.rad || '').includes(f.avbruttOrd)], ['avbrutt', ['Avbrutt'], true]);
+    }
 
     console.log('\n8. Konsoll');
     const konsoll = feil.filter(f => typeof f === 'string' && /Error|error/.test(f));
