@@ -20,11 +20,14 @@ Windows og Mac (arm64 + Intel), signerer Mac-byggene med Developer ID og sender 
 ## Tester
 
 ```bash
-npm test             # Rust (cargo test) + grensesnitt-riggen (headless Chrome)
+npm test             # Rust (craten + appen) + grensesnitt-riggen (headless Chrome)
 ```
 
-Rust-testene kjører opp- og nedlastingsløypa mot en falsk portal og et falskt lager som kan
-kutte forbindelsen, svare 500/403 eller slutte å lese — se `mod tester` i `src-tauri/src/lib.rs`.
+Opp- og nedlastingsløypa bor i craten `skapflyt` (`crates/skapflyt/`, en frittstående pakke —
+roten er ikke et workspace). Testene der kjører løypa mot en falsk portal og et falskt lager som kan
+kutte forbindelsen, svare 500/403 eller slutte å lese — se `crates/skapflyt/src/tester.rs` og
+`testportal.rs` (feature `testportal`). De kjøres også i CI (`.github/workflows/skapflyt.yml`)
+når craten endres. Appens egne tester står i `mod tester` i `src-tauri/src/lib.rs`.
 Loggen ligger i appens loggmappe (Innstillinger → Om → «Åpne loggmappa»).
 
 ## Lisens

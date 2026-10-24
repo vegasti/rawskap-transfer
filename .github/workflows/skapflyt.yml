@@ -1,0 +1,25 @@
+# SKAPFLYT (S1, 24/10): testene til overføringsmotoren i crates/skapflyt — nett-løypa mot den falske
+# portalen og lageret (kutt, 500/403, død linje, gjenopptak, forkast) og de rene testene. Craten
+# trenger verken Tauri eller ffmpeg, så den kjører på Linux, og et offentlig repo koster ingenting.
+# bygg.yml står som den er: den bygger appen, som henter craten med `path`.
+name: skapflyt
+
+on:
+  push:
+    paths: ['crates/skapflyt/**']
+  pull_request:
+    paths: ['crates/skapflyt/**']
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Rust-cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: crates/skapflyt
+
+      - name: Tester
+        run: cargo test --manifest-path crates/skapflyt/Cargo.toml --all-features
