@@ -1320,7 +1320,7 @@ async fn sikre_mappe(k: &reqwest::Client, portal: &str, rot: &str, relativ_dir: 
         sti = if sti.is_empty() { del.to_string() } else { format!("{sti}/{del}") };
         let mut c = cache.lock().await;
         if let Some(id) = c.get(&sti) { forelder = id.clone(); continue; }
-        let r = k.post(format!("{}/api/rawskap/mapper", portal)).json(&serde_json::json!({ "navn": del, "forelderId": mappe_json(&forelder) })).send().await.map_err(nettfeil)?;
+        let r = k.post(format!("{}/api/rawskap/mapper", portal)).json(&serde_json::json!({ "navn": del, "forelderId": mappe_json(&forelder), "gjenbruk": true })).send().await.map_err(nettfeil)?; // gjenbruk (0.3.8, Korea-rotet): portalen svarer mappa som alt finnes under samme forelder
         let d: serde_json::Value = r.json().await.map_err(nettfeil)?;
         let id = d["id"].as_str().ok_or_else(|| format!("Kunne ikke lage mappe «{del}»: {}", d["error"].as_str().unwrap_or("?")))?.to_string();
         c.insert(sti.clone(), id.clone()); forelder = id;
