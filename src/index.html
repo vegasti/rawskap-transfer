@@ -1515,7 +1515,7 @@
     const slutt = Date.now();
     historikk.unshift({
       navn: j.navn, type: j.type, status: j.status, filer: j.filer.length,
-      bytes: k.hentet, feilet: (j.feil || []).length, naar: slutt,
+      bytes: k.hentet, feilet: (j.feil || []).length, naar: slutt, fantes: k.fantes || 0,
       // Siste etappe ved gjenopptak — ikke hele livsløpet. Ærlig nok for
       // «hvor fort gikk det», og mye enklere enn å sy sammen etapper.
       sek: j.start ? Math.max(1, Math.round((slutt - j.start) / 1000)) : 0,
@@ -1687,11 +1687,13 @@
         // men laster du opp samme mappe på nytt, gikk alt i undermappene opp igjen, hver gang.
         // Vi trenger ingen nye API-kall for å rette det: hele mappetreet og fillista ligger i
         // klienten fra før, så undermappa kan slås opp ved navn.
+        // Navn sammenlignes uten forskjell på store/små bokstaver, som portalen gjør når den gjenbruker en mappe (26/10).
+        const likNavn = (a, b) => (a || '').trim().toLowerCase() === (b || '').trim().toLowerCase();
         const mappeForRelativ = (rotId, relativ) => {
           const deler = relativ.split('/').slice(0, -1);   // alt unntatt filnavnet
           let id = rotId || '';
           for (const navn of deler) {
-            const m = data.mapper.find(x => (x.forelderId || '') === id && x.navn === navn);
+            const m = data.mapper.find(x => (x.forelderId || '') === id && likNavn(x.navn, navn));
             if (!m) return null;   // undermappa finnes ikke i skapet ennå → ingenting å kollidere med
             id = m.id;
           }
@@ -1701,7 +1703,7 @@
         for (const f of j.filer) {
           const mid = mappeForRelativ(j.mappeId, f.relativ);
           if (mid === null) continue;
-          const treff = data.filer.filter(x => (x.mappeId || '') === mid && x.filnavn === f.filnavn);
+          const treff = data.filer.filter(x => (x.mappeId || '') === mid && likNavn(x.filnavn, f.filnavn));
           if (!treff.length) continue;
           if (treff.some(x => x.bytes === f.bytes)) { f.hopp = 'lik'; continue; }
           if (P.oppKonflikt === 'hopp') f.hopp = 'navn';
@@ -1845,7 +1847,7 @@
   const fmtFart = bps => { const s = bps >= 1e6 ? `${(bps / 1e6).toFixed(bps >= 1e7 ? 0 : 1)} MB/s` : `${Math.max(0, Math.round(bps / 1e3))} kB/s`; return erNo ? s.replace('.', ',') : s; };
   // «12t igjen» → «12t 40m igjen» — og engelsk får h, ikke t.
   const fmtEta = s => !isFinite(s) || s <= 0 ? '' : s >= 3600 ? `${Math.floor(s / 3600)}${erNo ? 't' : 'h'} ${Math.floor((s % 3600) / 60)}m` : s >= 60 ? `${Math.round(s / 60)}m` : `${Math.max(1, Math.round(s))}s`;
-  const jobbTall = j => { let hentet = 0, ferdig = 0; const total = j.filer.reduce((s, f) => s + f.bytes, 0); for (const f of j.filer) { const s = filTilstand.get(f.id); if (!s) continue; if (s.status === 'ferdig' || s.status === 'hoppet' || s.status === 'endretLokalt' || s.status === 'verifisert' || s.status === 'hoppetNavn' || s.status === 'somProxy' || s.status === 'utenProxy') { hentet += f.bytes; ferdig++; } else if (s.status !== 'feil') hentet += s.hentet; } return { hentet, total, ferdig }; };
+  const jobbTall = j => { let hentet = 0, ferdig = 0, fantes = 0; const total = j.filer.reduce((s, f) => s + f.bytes, 0); for (const f of j.filer) { const s = filTilstand.get(f.id); if (!s) continue; if (j.type === 'opp' && s.status === 'hoppet') fantes++; if (s.status === 'ferdig' || s.status === 'hoppet' || s.status === 'endretLokalt' || s.status === 'verifisert' || s.status === 'hoppetNavn' || s.status === 'somProxy' || s.status === 'utenProxy') { hentet += f.bytes; ferdig++; } else if (s.status !== 'feil') hentet += s.hentet; } return { hentet, total, ferdig, fantes }; };
   // Hvilken FASE er jobben i? null = det flyter bytes, altså vanlig
   // byte-visning. Ellers klargjøring/behandling som ikke er en overføring.
   // ⚠ Flere filer kan være i lufta samtidig (parallelle overføringer). Går det
@@ -1986,7 +1988,7 @@
     for (const j of jobber) {
       const k = jobbTall(j);
       const el = document.createElement('div'); el.className = 'jobbrad'; el.id = 'jb-' + j.id;
-      const st = j.status === 'pauset' ? `<span>⏸ ${t.pausetOrd}</span>` : j.status === 'kø' ? `<span>${t.iKo}</span>` : j.status === 'laster' ? `<div class="bar"><i style="width:${k.total ? Math.min(100, k.hentet / k.total * 100) : 0}%"></i></div><span class="status">${j.filer.length === 1 ? `${fmt(k.hentet)} / ${fmt(k.total)}` : `${k.ferdig}/${j.filer.length}`}</span>` : j.status === 'ferdig' ? (j.type === 'inn' && j.trygt ? `<span class="ok">✓</span><span class="trygt">${t.innTrygt}</span>` : `<span class="ok">✓</span><span>${t.ferdig}</span>`) : j.status === 'avbrutt' ? `<span class="feil">✕</span><span>${t.avbrutt}</span>` : `<span class="feil">✕</span><span>${j.ok} ok · ${j.feil.length} ${t.feilet}</span>`;
+      const st = j.status === 'pauset' ? `<span>⏸ ${t.pausetOrd}</span>` : j.status === 'kø' ? `<span>${t.iKo}</span>` : j.status === 'laster' ? `<div class="bar"><i style="width:${k.total ? Math.min(100, k.hentet / k.total * 100) : 0}%"></i></div><span class="status">${j.filer.length === 1 ? `${fmt(k.hentet)} / ${fmt(k.total)}` : `${k.ferdig}/${j.filer.length}`}</span>` : j.status === 'ferdig' ? (j.type === 'inn' && j.trygt ? `<span class="ok">✓</span><span class="trygt">${t.innTrygt}</span>` : `<span class="ok">✓</span><span>${t.ferdig}${k.fantes ? ` · ${k.fantes} ${t.fantesFraFor}` : ''}</span>`) : j.status === 'avbrutt' ? `<span class="feil">✕</span><span>${t.avbrutt}</span>` : `<span class="feil">✕</span><span>${j.ok} ok · ${j.feil.length} ${t.feilet}</span>`;
       el.innerHTML = `<span class="navn">${typeIkon(j.type)} ${esc(j.navn)}</span><span class="tall">${j.filer.length}</span><span class="tall"${gibAttr(k.total)}>${fmt(k.total)}</span><span class="st">${st}</span><span class="rad"></span>`;
       const rad = el.querySelector('.rad');
       const mk = document.createElement('button'); mk.className = 'btn liten meny-knapp'; mk.textContent = '⋯'; rad.appendChild(mk);
@@ -2048,7 +2050,8 @@
       const fart = h.sek > 0 && h.bytes > 0 ? ` · ${fmtFart(h.bytes / h.sek)}` : '';
       const ikon = h.status === 'ferdig' ? '<span class="ok">✓</span>' : h.status === 'avbrutt' ? '◌' : '<span style="color:var(--rød,#e5484d)">✕</span>';
       const feil = h.feilet ? ` · ${h.feilet} ${t.feilet}` : '';
-      return `<div class="jobbrad" style="opacity:.75"><span class="navn">${typeIkon(h.type)} ${esc(h.navn)}</span><span class="tall">${h.filer}</span><span class="tall"${gibAttr(h.bytes)}>${fmt(h.bytes)}</span><span class="st"><span>${ikon} ${naar}${fart}${feil}</span></span><span></span></div>`;
+      const fantes = h.fantes ? ` · ${h.fantes} ${t.fantesFraFor}` : '';
+      return `<div class="jobbrad" style="opacity:.75"><span class="navn">${typeIkon(h.type)} ${esc(h.navn)}</span><span class="tall">${h.filer}</span><span class="tall"${gibAttr(h.bytes)}>${fmt(h.bytes)}</span><span class="st"><span>${ikon} ${naar}${fart}${feil}${fantes}</span></span><span></span></div>`;
     }).join('');
     hp.innerHTML = `<div class="jobbrad hode"><span>${t.navn}</span><span class="tall">${t.kolFiler}</span><span class="tall">${t.storrelse}</span><span>${t.kolStatus}</span><span style="text-align:right"><button class="btn liten" id="hist-tom">${t.histTom}</button></span></div>` + rader;
     const knapp = document.getElementById('hist-tom');

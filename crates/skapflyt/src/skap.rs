@@ -48,6 +48,9 @@ pub async fn kobling_poll(portal: &str, kode: &str, hemmelighet: &str) -> Result
 
 /// Sørger for at undermappene i `relativ_dir` finnes under `rot` i skapet, og gir id-en til den
 /// innerste. `cache` husker sti → id for hele jobben, så hver mappe lages én gang.
+///
+/// `gjenbruk` (26/10, Korea-rotet): portalen svarer mappa som alt finnes med samme navn under samme forelder.
+/// Uten den laget hver jobb nye søskenmapper — fire «tl» under Korea. En eldre portal ignorerer feltet.
 pub async fn sikre_mappe(k: &Klient, rot: &str, relativ_dir: &str, cache: &tokio::sync::Mutex<std::collections::HashMap<String, String>>) -> Result<String, Feil> {
     if relativ_dir.is_empty() { return Ok(rot.to_string()); }
     let mut forelder = rot.to_string(); let mut sti = String::new();
@@ -55,7 +58,7 @@ pub async fn sikre_mappe(k: &Klient, rot: &str, relativ_dir: &str, cache: &tokio
         sti = if sti.is_empty() { del.to_string() } else { format!("{sti}/{del}") };
         let mut c = cache.lock().await;
         if let Some(id) = c.get(&sti) { forelder = id.clone(); continue; }
-        let r = k.api().post(format!("{}/api/rawskap/mapper", k.portal())).json(&serde_json::json!({ "navn": del, "forelderId": mappe_json(&forelder) })).send().await.map_err(nett)?;
+        let r = k.api().post(format!("{}/api/rawskap/mapper", k.portal())).json(&serde_json::json!({ "navn": del, "forelderId": mappe_json(&forelder), "gjenbruk": true })).send().await.map_err(nett)?;
         let st = r.status().as_u16();
         let d: serde_json::Value = r.json().await.map_err(nett)?;
         let id = d["id"].as_str().ok_or_else(|| Feil::server(st, format!("Kunne ikke lage mappe «{del}»: {}", d["error"].as_str().unwrap_or("?"))))?.to_string();
