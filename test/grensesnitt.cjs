@@ -276,6 +276,30 @@ window.__TAURI__ = (() => {
     sjekk('framdriften regnes: skjult, ubestemt, prosent', JSON.parse(await ev(`JSON.stringify([[false, 0.5], [true, null], [true, 0.4269], [true, 1.2]].map(([a, x]) => window.__rawskapOverf.framdriftVerdi(a, x)))`)), [-1, -2, 42, 100]);
     sjekk('og skjules når ingenting går', framdrift[framdrift.length - 1], -1);
 
+    // Tiden igjen (6/11, Vegard: «i transfer så hopper tiden veldig»): Korea-jobben simulert — 680 GB igjen, 12 MB/s
+    // ± 80 % og 7 s stopp hvert 97. sekund, en prøve i sekundet som i appen. Med 10-sekundersnittet gikk tiden fra 10
+    // til 109 timer; nå skal den holde seg rolig og aldri hoppe mer enn 15 minutter fra ett sekund til neste.
+    const eta = JSON.parse(await ev(`JSON.stringify((() => {
+      const { snittFart, etaSteg } = window.__rawskapOverf;
+      let seed = 7; const r = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+      const kjor = (total, b, sekunder, fra) => {
+        const prover = []; let eta = null; const vist = [];
+        for (let s = 0; s < sekunder && b < total; s++) {
+          b = Math.min(total, b + (s % 97 > 90 ? 0 : 12e6 * (0.2 + 1.6 * r())));
+          prover.push({ t: s * 1000, b }); while (prover.length > 2 && prover[0].t < s * 1000 - 60000) prover.shift();
+          const bps = snittFart(prover, 60000);
+          eta = etaSteg(eta, bps > 1000 && b < total ? (total - b) / bps : null);
+          if (s >= fra && eta != null) vist.push(eta);
+        }
+        return { min: Math.min(...vist), max: Math.max(...vist), hopp: Math.max(...vist.slice(1).map((x, i) => Math.abs(x - vist[i] + 1))) };
+      };
+      return { lang: kjor(1433.32e9, 754.01e9, 1800, 60), kort: kjor(9e8, 0, 75, 5) };
+    })())`));
+    sjekk('tiden igjen holder seg rolig på en lang jobb (12–21 t, ikke 10–109)', eta.lang.min > 12 * 3600 && eta.lang.max < 21 * 3600, true);
+    sjekk('… og hopper aldri mer enn 15 min fra ett sekund til neste', eta.lang.hopp < 15 * 60, true);
+    sjekk('en kort jobb teller jevnt ned (høyst 3 s hopp)', eta.kort.hopp <= 3, true);
+    sjekk('snittFart bruker aldri den nyeste prøven alene', JSON.parse(await ev(`JSON.stringify(window.__rawskapOverf.snittFart([{ t: 0, b: 0 }, { t: 1000, b: 5e6 }], 10000))`)), 5e6);
+
     console.log('\n7c. Minnekort: reservekopi og «trygt å formatere» (T4)');
     await send('Page.navigate', { url: 'file:///' + fil.replace(/\\/g, '/') });
     await sov(3000);

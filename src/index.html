@@ -1724,7 +1724,7 @@
             oktTimer = setInterval(() => {
               if (aktiv !== j) return;
               const t2 = oktTall(j);
-              const eta = fartModen() && fartBps > 0 ? Math.round(Math.max(0, t2.bytes - t2.ferdigeBytes - t2.sendtBytes) / fartBps) : null;
+              const eta = fartModen() && etaBps > 0 ? Math.round(Math.max(0, t2.bytes - t2.ferdigeBytes - t2.sendtBytes) / etaBps) : null;
               oktKall({ action: 'okt-framdrift', oktId: j.oktId, ferdige: t2.ferdige, ferdigeBytes: t2.ferdigeBytes, sendtBytes: t2.sendtBytes, etaSek: eta });
             }, 15000);
           }
@@ -1828,17 +1828,40 @@
   // gangen) er fikset i Rust; her måler vi i tillegg over et VINDU — differansen
   // mellom nyeste og eldste prøve i vinduet — så ETA-en slutter å hoppe mellom
   // «2 min» og «49 min». Vinduet nullstilles når køen er tom.
+  // TIDEN IGJEN FRA SISTE MINUTT (6/11, Vegard: «i transfer så hopper tiden veldig … regne basert gjennomsnitt fart
+  // siste minutt»): farten som VISES, er fortsatt 10-sekundersnittet (den skal følge med), men tiden igjen regnes med
+  // snittet over det siste minuttet — og før jobben har gått et minutt, snittet siden den startet. Et hakk i nettet
+  // eller en fil som setter sammen, flytter da ikke «15t 24m» flere timer. Prøvene gjelder én jobb: en ny aktiv jobb
+  // begynner på nytt (før ble telleren til den forrige trukket fra den nye).
+  // Og selve tiden teller ned ett sekund i sekundet og trekkes rolig mot den målte (8 % per sekund), så sifrene ikke
+  // hopper hvert sekund. Simulert på Korea-jobben (680 GB igjen, 12 MB/s ± 80 %, stopp innimellom): 10-sekundersnittet
+  // gikk fra 10 til 109 timer, minuttsnittet holder seg mellom 13 og 20, og en kort jobb teller nesten jevnt ned.
   const FART_VINDU_MS = 10000;
-  let fartProver = [], fartBps = 0;
+  const ETA_VINDU_MS = 60000;
+  // Snittfarten (byte/s) fra prøvene {t, b} over de siste `ms`: den eldste prøven innenfor, men aldri den nyeste selv.
+  const snittFart = (prover, ms) => {
+    if (prover.length < 2) return 0;
+    const naa = prover[prover.length - 1];
+    const i = prover.findIndex(p => p.t >= naa.t - ms);
+    const fra = prover[Math.min(Math.max(0, i), prover.length - 2)];
+    const dt = (naa.t - fra.t) / 1000;
+    return dt > 0 ? Math.max(0, (naa.b - fra.b) / dt) : 0;
+  };
+  // Tiden igjen ett sekund senere: ned ett sekund, og 8 % av veien mot den målte (null = ingen måling).
+  const etaSteg = (forrige, maalt) => (maalt == null ? null : forrige == null ? maalt : Math.max(0, forrige - 1 + 0.08 * (maalt - (forrige - 1))));
+  Object.assign(window.__rawskapOverf, { snittFart, etaSteg });
+  let fartProver = [], fartBps = 0, etaBps = 0, etaSek = null, fartJobb = null;
   setInterval(() => {
-    if (!aktiv) { fartProver = []; fartBps = 0; return; }
-    const naa = { t: Date.now(), b: jobbTall(aktiv).hentet };
+    if (!aktiv) { fartProver = []; fartBps = 0; etaBps = 0; etaSek = null; fartJobb = null; return; }
+    if (fartJobb !== aktiv.id) { fartProver = []; fartBps = 0; etaBps = 0; etaSek = null; fartJobb = aktiv.id; }
+    const jt = jobbTall(aktiv);
+    const naa = { t: Date.now(), b: jt.hentet };
     fartProver.push(naa);
-    // Behold prøvene innenfor vinduet, men ALLTID minst to (ellers ingen måling).
-    while (fartProver.length > 2 && fartProver[0].t < naa.t - FART_VINDU_MS) fartProver.shift();
-    const eldst = fartProver[0];
-    const dt = (naa.t - eldst.t) / 1000;
-    fartBps = dt > 0 ? Math.max(0, (naa.b - eldst.b) / dt) : 0;
+    // Behold prøvene innenfor minuttet, men ALLTID minst to (ellers ingen måling).
+    while (fartProver.length > 2 && fartProver[0].t < naa.t - ETA_VINDU_MS) fartProver.shift();
+    fartBps = snittFart(fartProver, FART_VINDU_MS);
+    etaBps = snittFart(fartProver, ETA_VINDU_MS);
+    etaSek = etaSteg(etaSek, etaBps > 1000 && jt.total > jt.hentet ? (jt.total - jt.hentet) / etaBps : null);
     oppdaterLinje();
   }, 1000);
   // ETA vises først når vi har målt over noen sekunder — de første prøvene er
@@ -1943,7 +1966,7 @@
         return;
       }
       const fart = fartBps > 1000 ? ` · ${fmtFart(fartBps)}` : '';
-      const eta = fartModen() && fartBps > 1000 && k.total > k.hentet ? ` · ${fmtEta((k.total - k.hentet) / fartBps)} ${t.igjen}` : '';
+      const eta = fartModen() && etaSek != null && k.total > k.hentet ? ` · ${fmtEta(etaSek)} ${t.igjen}` : '';
       $('overf-tekst').textContent = `${typeIkon(aktiv.type)} ${aktiv.navn} · ${fmt(k.hentet)} / ${fmt(k.total)}${fart}${eta}${kø ? ` · +${kø} ${t.iKo}` : ''}`;
       gibTittel($('overf-tekst'), k.hentet, k.total);
     }
