@@ -343,6 +343,15 @@ window.__TAURI__ = (() => {
     sjekk('«trygt å formatere» vises når Rust sier trygt', /trygt å formatere|safe to format/.test(inn.trygt || ''), true);
     sjekk('og ellers ikke', /trygt å formatere|safe to format/.test(inn.ikkeTrygt || '') || !inn.ikkeTrygt, false);
     sjekk('to innlesinger', inn.antall, 2);
+
+    // Hold maskinen våken (6/11): på mens en jobb laster, av når køen er tom — og bryteren i Innstillinger (standard på).
+    const vaak = JSON.parse(await ev(`JSON.stringify(window.__kall.filter(k => k.cmd === 'hold_vaaken').map(k => k.args.paa))`));
+    sjekk('maskinen holdes våken mens innlesingen går', vaak.includes(true), true);
+    sjekk('og slippes når køen er tom', vaak[vaak.length - 1], false);
+    sjekk('aldri to like kall på rad', vaak.every((v, i) => i === 0 || v !== vaak[i - 1]), true);
+    sjekk('bryteren står på som standard', await ev(`(async () => { document.getElementById('vis-innst').click(); await new Promise(r => setTimeout(r, 150)); return document.getElementById('p-vaaken').checked; })()`), true);
+    sjekk('og huskes når den slås av', await ev(`(async () => { const b = document.getElementById('p-vaaken'); b.checked = false; b.dispatchEvent(new Event('change')); await new Promise(r => setTimeout(r, 150)); return window.__butikk.get('pref').vaaken; })()`), false);
+
     await send('Page.navigate', { url: 'file:///' + fil.replace(/\\/g, '/') + '?inn=1' });
     await sov(3000);
     sjekk('husket reservekopi vises ved oppstart', await ev(`(async () => { document.getElementById('vis-innlast').click(); await new Promise(r => setTimeout(r, 150)); return { paa: document.getElementById('inn-reserve-bryter').checked, sti: document.getElementById('inn-reserve-sti').textContent, synlig: !document.getElementById('inn-reserve-rad').classList.contains('skjult') }; })()`), { paa: true, sti: 'E:\\Reserve', synlig: true });

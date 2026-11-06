@@ -625,6 +625,74 @@ fn sett_framdrift(app: tauri::AppHandle, prosent: i64) {
     let _ = w.set_progress_bar(ProgressBarState { status: Some(status), progress });
 }
 
+// Hold maskinen våken mens noe overføres (6/11, Korea-jobben på 15 timer): uten dette går en bærbar i
+// dvale midt i natta, og jobben står til noen vekker den. Bare SYSTEMET holdes våkent — skjermen får
+// slå seg av, og lokket overstyres ikke. Grensesnittet slår vakta på når en jobb laster og av når køen
+// er tom eller pauset (`speilVaaken`); innstillingen «Hold maskinen våken» styrer om den brukes.
+mod vaaken {
+    /// Windows: SetThreadExecutionState gjelder TRÅDEN som kaller den, så vakta er en egen tråd som
+    /// holder tilstanden til avsenderen droppes. Da nullstiller den og avslutter.
+    #[cfg(target_os = "windows")]
+    pub struct Vakt(#[allow(dead_code)] std::sync::mpsc::Sender<()>);
+    #[cfg(target_os = "windows")]
+    pub fn hold() -> Option<Vakt> {
+        use windows_sys::Win32::System::Power::{SetThreadExecutionState, ES_CONTINUOUS, ES_SYSTEM_REQUIRED};
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let (klar_tx, klar_rx) = std::sync::mpsc::channel::<bool>();
+        std::thread::Builder::new().name("vaaken".into()).spawn(move || {
+            // SAFETY: ren Win32-funksjon uten pekere; returnerer 0 ved feil.
+            let ok = unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) } != 0;
+            let _ = klar_tx.send(ok);
+            if !ok { return; }
+            let _ = rx.recv(); // blokkerer til Vakt (og dermed avsenderen) droppes
+            unsafe { SetThreadExecutionState(ES_CONTINUOUS); }
+        }).ok()?;
+        if klar_rx.recv().unwrap_or(false) { Some(Vakt(tx)) } else { None }
+    }
+
+    /// Mac: `caffeinate -i` hindrer dvale ved inaktivitet; `-w` avslutter den av seg selv hvis appen
+    /// krasjer, så maskinen aldri blir stående våken etter oss.
+    #[cfg(target_os = "macos")]
+    pub struct Vakt(std::process::Child);
+    #[cfg(target_os = "macos")]
+    impl Drop for Vakt {
+        fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+    }
+    #[cfg(target_os = "macos")]
+    pub fn hold() -> Option<Vakt> {
+        std::process::Command::new("/usr/bin/caffeinate")
+            .args(["-i", "-w", &std::process::id().to_string()])
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .spawn().ok().map(Vakt)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    pub struct Vakt;
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    pub fn hold() -> Option<Vakt> { None }
+
+    pub static VAKT: std::sync::Mutex<Option<Vakt>> = std::sync::Mutex::new(None);
+
+    /// Slår vakta på eller av. Svarer om maskinen holdes våken etterpå.
+    pub fn sett(paa: bool) -> bool {
+        let mut v = VAKT.lock().unwrap_or_else(|e| e.into_inner());
+        let var = v.is_some();
+        if !paa {
+            *v = None;
+            if var { log::info!("slipper maskinen (kan sove igjen)"); }
+            return false;
+        }
+        if !var {
+            *v = hold();
+            if v.is_some() { log::info!("holder maskinen våken"); } else { log::warn!("fikk ikke holdt maskinen våken"); }
+        }
+        v.is_some()
+    }
+}
+
+#[tauri::command]
+fn hold_vaaken(paa: bool) -> bool { vaaken::sett(paa) }
+
 #[tauri::command]
 async fn sjekk_versjon() -> Result<String, String> {
     let r = reqwest::Client::builder()
@@ -1280,7 +1348,7 @@ pub fn run() {
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
         .invoke_handler(tauri::generate_handler![avbryt_fil, les_lokal,
-            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, opplasting_okt, last_inn, hent_liste, hent_deling, deling_passord, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, ledig_plass, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, sett_framdrift, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn, forkast_opplasting, apne_loggmappe, lightroom_status, installer_lightroom])
+            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, opplasting_okt, last_inn, hent_liste, hent_deling, deling_passord, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, ledig_plass, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, sett_framdrift, hold_vaaken, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn, forkast_opplasting, apne_loggmappe, lightroom_status, installer_lightroom])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
@@ -1294,6 +1362,16 @@ pub fn run() {
 #[cfg(test)]
 mod tester {
     use super::*;
+
+    /// Hold maskinen våken (6/11): vakta tas og slippes, og et nytt «på» mens den holder lager ikke en ny.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn maskinen_holdes_vaaken_og_slippes() {
+        assert!(vaaken::sett(true), "fikk ikke holdt maskinen våken");
+        assert!(vaaken::sett(true), "andre «på» skal beholde vakta");
+        assert!(!vaaken::sett(false));
+        assert!(vaaken::VAKT.lock().unwrap().is_none());
+    }
 
     /// `ledig_plass` må tåle at målmappa ikke finnes ennå — den lages først når
     /// jobben starter. Uten oppoverklatringen ville bekreftelsesmodalen aldri

@@ -50,3 +50,8 @@ zip = { version = "4", default-features = false, features = ["deflate-flate2"] }
 sha2 = "0.10"
 # zip slår av flate2 sine standardfunksjoner — da mangler komprimeringsmotoren. Samme versjon som i treet.
 flate2 = "1"
+
+# Hold maskinen våken under overføringer (6/11): SetThreadExecutionState. windows-sys 0.61 fantes alt i
+# treet (via tauri) — bare funksjonen Win32_System_Power slås på. Mac bruker /usr/bin/caffeinate.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Power"] }
