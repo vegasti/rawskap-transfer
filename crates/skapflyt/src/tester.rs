@@ -935,3 +935,20 @@ fn forkast_rydder_hos_serveren_og_lokalt() {
         assert_eq!(sendt, ["originals/forkast-v1.bin", "originals/forkast.bin"]);
     });
 }
+
+/// «Del og send» (6/11): mottakerne og meldingen lander der portalens delingsdialog legger dem — `mottakere` og
+/// `innstillinger.melding` — uten å skrive over kundens egne defaults. Tomme verdier sendes ikke i det hele tatt.
+#[test]
+fn delingen_faar_mottakere_og_melding_uten_aa_miste_defaults() {
+    let defaults = serde_json::json!({ "tilgang": "passord", "innstillinger": { "tema": "mork" } });
+    let b = crate::deling::delings_body(defaults, "m1", "Korea", &[" Ola@Firma.no ".into(), "ikke-en-adresse".into(), "kari@x.no".into()], "  Her er filene  ");
+    assert_eq!(b["mappeRef"], "m1");
+    assert_eq!(b["navn"], "Korea");
+    assert_eq!(b["tilgang"], "passord");
+    assert_eq!(b["mottakere"], serde_json::json!(["ola@firma.no", "kari@x.no"]));
+    assert_eq!(b["innstillinger"]["tema"], "mork");
+    assert_eq!(b["innstillinger"]["melding"], "Her er filene");
+    let tom = crate::deling::delings_body(serde_json::Value::Null, "m1", "Korea", &[], " ");
+    assert!(tom.get("mottakere").is_none() && tom.get("innstillinger").is_none(), "{tom}");
+    assert_eq!(tom["bildeIds"], serde_json::json!([]));
+}

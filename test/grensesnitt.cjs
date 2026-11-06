@@ -24,8 +24,8 @@ const getJson = u => new Promise((res, rej) => http.get(u, r => { let d = ''; r.
 // Fire filer i rota, to i en undermappe — nok til aa proeve spenn-valg og undermappe-sti.
 const FILER = [
   { id: 'a1', filnavn: 'RAW00001.ARW', bytes: 65000000, mappeId: 'm1', opprettet: '2026-09-17T10:00:00Z' },
-  { id: 'a2', filnavn: 'RAW00002.ARW', bytes: 66000000, mappeId: 'm1', opprettet: '2026-09-17T10:01:00Z' },
-  { id: 'a3', filnavn: 'RAW00003.ARW', bytes: 67000000, mappeId: 'm1', opprettet: '2026-09-17T10:02:00Z' },
+  { id: 'a2', filnavn: 'RAW00002.ARW', bytes: 66000000, mappeId: 'm1', opprettet: '2026-09-17T10:01:00Z', xxh64: 'aaaaaaaaaaaaaaaa' },
+  { id: 'a3', filnavn: 'RAW00003.ARW', bytes: 67000000, mappeId: 'm1', opprettet: '2026-09-17T10:02:00Z', xxh64: 'bbbbbbbbbbbbbbbb' },
   { id: 'a4', filnavn: 'RAW00004.ARW', bytes: 68000000, mappeId: 'm1', opprettet: '2026-09-17T10:03:00Z' },
   { id: 'b1', filnavn: 'UNDER01.ARW', bytes: 61000000, mappeId: 'm2', opprettet: '2026-09-17T10:04:00Z' },
   { id: 'b2', filnavn: 'UNDER02.ARW', bytes: 62000000, mappeId: 'm2', opprettet: '2026-09-17T10:05:00Z' },
@@ -48,7 +48,8 @@ window.__TAURI__ = (() => {
     window.__kall.push({ cmd, args });
     // Feiltekstene (24/10): window.__avvis[cmd] er teksten kallet avvises med (som Rusts Err), window.__svar[cmd] svaret.
     if (window.__avvis && Object.prototype.hasOwnProperty.call(window.__avvis, cmd)) throw window.__avvis[cmd];
-    if (window.__svar && Object.prototype.hasOwnProperty.call(window.__svar, cmd)) return window.__svar[cmd];
+    // Et svar som er en funksjon kalles med argumentene (6/11) — f.eks. et løfte riggen selv løser, så en jobb kan stå «laster».
+    if (window.__svar && Object.prototype.hasOwnProperty.call(window.__svar, cmd)) { const s = window.__svar[cmd]; return typeof s === 'function' ? s(args) : s; }
     if (cmd === 'hent_liste') return data;
     // To av seks mangler lokalt — det er det «N nye» skal telle.
     if (cmd === 'mangler_lokalt') return ['a3', 'b2'];
@@ -435,6 +436,102 @@ window.__TAURI__ = (() => {
       sjekk(`${s}: DELING_LAAST og ukjent tekst i framdrift`, r.fram2, f.fram2);
       sjekk(`${s}: samme tekst når lista tegnes på nytt`, r.tegnet, f.fram2);
       sjekk(`${s}: Avbrutt i jobbresultatet gir avbrutt jobb`, [r.avbrutt.status, r.avbrutt.feil, (r.avbrutt.rad || '').includes(f.avbruttOrd)], ['avbrutt', ['Avbrutt'], true]);
+    }
+
+    console.log('\n7e. Opplasting: sidefiler og samme fil i en annen mappe (6/11)');
+    // Jobben: en Inspire-mappe med MXF + DJI-sidefilene, en løs Sony-XML uten klipp, en fil som ligger i «Jobb 17. sept»
+    // med samme navn og størrelse, en omdøpt kopi (samme størrelse + sjekksum som RAW00002), en fil med samme størrelse
+    // som RAW00003 men annen sjekksum, og en liten fil.
+    const D = 'D:/Inspire/';
+    const INSPIRE = [
+      ['A013C023_261005RY.MXF', 900000000], ['A013C023_261005RYM01.XML', 3000], ['A013C023_261005RYR01.BIM', 50000],
+      ['C0001M01.XML', 2000], ['RAW00001.ARW', 65000000], ['omdopt.ARW', 66000000], ['annen.ARW', 67000000], ['liten.png', 1000],
+    ].map(([n, b]) => ({ sti: D + n, relativ: n, bytes: b }));
+    const opp = async (pref) => ev(`(async () => {
+      const v = ms => new Promise(r => setTimeout(r, ms));
+      const $ = id => document.getElementById(id);
+      $('vis-innst').click(); await v(100);
+      const kopi = $('p-oppkopi'), side = $('p-sidefiler');
+      const standard = { kopi: kopi.value, sidefiler: side.checked };
+      kopi.value = ${JSON.stringify(pref.kopi)}; kopi.dispatchEvent(new Event('change'));
+      side.checked = ${JSON.stringify(pref.sidefiler)}; side.dispatchEvent(new Event('change'));
+      window.__kall.length = 0;
+      window.__svar = { les_mappe: ${JSON.stringify(INSPIRE)}, last_opp: a => ({ ok: a.filer.length, feil: [] }),
+        hash_filer: { hasher: { '${D}omdopt.ARW': 'aaaaaaaaaaaaaaaa', '${D}annen.ARW': 'cccccccccccccccc' }, avbrutt: false } };
+      window.__dialog = ['D:/Inspire'];
+      $('last-opp-mappe').click(); await v(900);
+      const k = window.__kall.find(k => k.cmd === 'last_opp');
+      const h = window.__kall.find(k => k.cmd === 'hash_filer');
+      const rad = n => ((document.getElementById('f-${D}' + n) || {}).querySelector?.('.status') || {}).textContent;
+      const jobb = [...document.querySelectorAll('#overf-panel .jobbrad:not(.hode)')].map(r => r.querySelector('.st').textContent.trim())[0];
+      window.__svar = {};
+      return { standard, sendt: k ? k.args.filer.map(f => f.sti.replace('${D}', '')) : null, hashet: h ? h.args.filer.map(f => f.sti.replace('${D}', '')) : null,
+        rader: ['RAW00001.ARW', 'omdopt.ARW', 'A013C023_261005RYM01.XML'].map(rad), jobb };
+    })()`);
+    await send('Page.navigate', { url: 'file:///' + fil.replace(/\\/g, '/') });
+    await sov(3000);
+    const o1 = await opp({ kopi: 'hopp', sidefiler: false });
+    sjekk('standard: hopp over kopier, ikke last opp sidefiler', o1.standard, { kopi: 'hopp', sidefiler: false });
+    sjekk('sidefilene og kopiene sendes ikke; løs XML, ny fil, annen sjekksum og liten fil sendes', o1.sendt, ['A013C023_261005RY.MXF', 'C0001M01.XML', 'annen.ARW', 'liten.png']);
+    sjekk('sjekksum bare for filer med lik størrelse og kjent sjekksum i skapet', o1.hashet, ['omdopt.ARW', 'annen.ARW']);
+    sjekk('radene sier hvor kopien ligger, og at sidefila ble liggende', o1.rader, ['✓ finnes i «Jobb 17. sept»', '✓ finnes i «Jobb 17. sept»', '– kameraets sidefil — ikke lastet opp']);
+    sjekk('jobben teller kopiene som «fantes», ikke sidefilene', /2 fantes allerede/.test(o1.jobb || ''), true);
+    const o2 = await opp({ kopi: 'last', sidefiler: true });
+    sjekk('med begge valgene av sendes alt, uten sjekksum', [o2.sendt && o2.sendt.length, o2.hashet], [INSPIRE.length, null]);
+    sjekk('valgene huskes', await ev(`(() => { const p = window.__butikk.get('pref'); return [p.oppKopi, p.oppSidefiler]; })()`), ['last', true]);
+
+    console.log('\n7f. Del og send (6/11)');
+    const delSend = async (medJobb) => ev(`(async () => {
+      const v = ms => new Promise(r => setTimeout(r, ms));
+      const $ = id => document.getElementById(id);
+      window.__kall.length = 0;
+      window.__svar = { del_mappe: { token: 'tok123', id: 'recDel1' }, send_deling: { ok: true, sendt: 2 }, opplasting_okt: { oktId: 'okt_1' } };
+      const tre = () => [...document.querySelectorAll('#tre button')].find(b => b.title === 'Jobb 17. sept');
+      if (${medJobb}) {
+        tre().click(); await v(200);
+        window.__svar.les_mappe = [{ sti: 'D:/Ny/x.ARW', relativ: 'x.ARW', bytes: 1234 }];
+        window.__svar.last_opp = () => new Promise(r => { window.__slipp = r; });
+        window.__dialog = ['D:/Ny'];
+        $('last-opp-mappe').click(); await v(700);
+      }
+      tre().dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 200, clientY: 200 })); await v(100);
+      const valg = [...document.querySelectorAll('#kmeny button')].find(b => /Del og send/.test(b.textContent));
+      if (!valg) return { feil: 'fant ikke valget i mappemenyen' };
+      valg.click(); await v(150);
+      const apen = $('send-bak').classList.contains('åpen'), ventSynlig = !$('send-vent-rad').hidden, ventPaa = $('send-vent').checked;
+      $('send-ok').click(); await v(100);
+      const tomAvvist = [$('send-bak').classList.contains('åpen'), $('send-feil').textContent];
+      $('send-til').value = 'Ola@firma.no; kari@x.no, ikke-en-adresse'; $('send-melding').value = ' Her er filene ';
+      $('send-ok').click(); await v(400);
+      const del = window.__kall.find(k => k.cmd === 'del_mappe');
+      const forSlutt = window.__kall.filter(k => k.cmd === 'send_deling').map(k => k.args.naarFerdig);
+      const tekstFor = $('overf-tekst').textContent;
+      if (${medJobb}) { window.__slipp({ ok: 1, feil: [] }); await v(600); }
+      const kall = window.__kall.map(k => k.cmd === 'opplasting_okt' ? 'okt:' + k.args.data.action : k.cmd);
+      window.__svar = {};
+      return { apen, ventSynlig, ventPaa, tomAvvist, del: del && { mappeId: del.args.mappeId, mottakere: del.args.mottakere, melding: del.args.melding },
+        forSlutt, tekstFor, etter: window.__kall.filter(k => k.cmd === 'send_deling').map(k => k.args), sendIndeks: kall.indexOf('send_deling'), oktFerdig: kall.indexOf('okt:okt-ferdig'),
+        tekstEtter: $('overf-tekst').textContent, utklipp: null };
+    })()`);
+    await send('Page.navigate', { url: 'file:///' + fil.replace(/\\/g, '/') });
+    await sov(3000);
+    const s1 = await delSend(false);
+    if (s1 && s1.feil) sjekk('Del og send finnes i mappemenyen', s1.feil, null);
+    else {
+      sjekk('vinduet åpnes, uten «når ferdig» når ingen opplasting går hit', [s1.apen, s1.ventSynlig], [true, false]);
+      sjekk('tom mottakerliste avvises i vinduet', s1.tomAvvist, [true, 'Skriv minst én e-postadresse.']);
+      sjekk('delingen lages med gyldige adresser og meldingen', s1.del, { mappeId: 'm1', mottakere: ['ola@firma.no', 'kari@x.no'], melding: 'Her er filene' });
+      sjekk('og sendes med en gang', s1.forSlutt, [false]);
+      sjekk('linja sier hvor mange den gikk til', /sendt til 2/.test(s1.tekstFor), true);
+    }
+    const s2 = await delSend(true);
+    if (s2 && s2.feil) sjekk('Del og send med opplasting', s2.feil, null);
+    else {
+      sjekk('med opplasting hit: «send når ferdig» vises og står på', [s2.ventSynlig, s2.ventPaa], [true, true]);
+      sjekk('ingenting sendes før jobben er ferdig', s2.forSlutt, []);
+      sjekk('linja sier at den venter', /sendes når opplastingen er ferdig/.test(s2.tekstFor), true);
+      sjekk('når jobben er ferdig, bes portalen sende når økta lukkes', s2.etter, [{ portal: 'https://rawskap.no', nokkel: 'x', id: 'recDel1', naarFerdig: true }]);
+      sjekk('og det skjer FØR økta lukkes', s2.sendIndeks >= 0 && s2.oktFerdig > s2.sendIndeks, true);
     }
 
     console.log('\n8. Konsoll');

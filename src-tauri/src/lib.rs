@@ -1046,9 +1046,36 @@ async fn opplasting_okt(portal: String, nokkel: String, data: serde_json::Value)
 
 /// DEL FRA APPEN (0.2.0): opprett en LEVENDE mappe-deling med kundens egne delings-defaults —
 /// se skapflyt::del_mappe.
+/// `mottakere`/`melding` (6/11) kommer bare fra «Del og send» — «Del mappe» sender dem ikke.
 #[tauri::command]
-async fn del_mappe(portal: String, nokkel: String, mappe_id: String, navn: String) -> Result<serde_json::Value, String> {
-    Ok(skapflyt::del_mappe(&klient(&portal, &nokkel)?, &mappe_id, &navn).await?)
+async fn del_mappe(portal: String, nokkel: String, mappe_id: String, navn: String, mottakere: Option<Vec<String>>, melding: Option<String>) -> Result<serde_json::Value, String> {
+    Ok(skapflyt::del_mappe(&klient(&portal, &nokkel)?, &mappe_id, &navn, &mottakere.unwrap_or_default(), &melding.unwrap_or_default()).await?)
+}
+
+/// «Del og send» (6/11): send delingen på e-post nå, eller (`naar_ferdig`) når opplastingen inn i mappa er ferdig —
+/// se skapflyt::send_deling. Frontenden kaller den først når appens EGNE jobber hit er ferdige.
+#[tauri::command]
+async fn send_deling(portal: String, nokkel: String, id: String, naar_ferdig: bool) -> Result<serde_json::Value, String> {
+    Ok(skapflyt::send_deling(&klient(&portal, &nokkel)?, &id, naar_ferdig).await?)
+}
+
+/// FINNES I SKAPET FRA FØR (6/11): sjekksum av lokale filer før opplasting, så en omdøpt kopi av en fil som alt
+/// ligger i skapet kjennes igjen. Frontenden ber bare om filer der skapet har en fil med NØYAKTIG samme størrelse
+/// og kjent sjekksum — så de fleste jobber hasher ingenting. Framdriften går som «hash» på fil-raden.
+/// `avbrutt`: brukeren stoppet jobben underveis (pause/avbryt) — da skal opplastingen ikke starte.
+#[tauri::command]
+async fn hash_filer(app: AppHandle, tilstand: State<'_, Tilstand>, filer: Vec<OppFil>) -> Result<serde_json::Value, String> {
+    let app = App(app);
+    tilstand.avbryt.store(false, Ordering::Relaxed);
+    let mut hasher = serde_json::Map::new();
+    for f in &filer {
+        if tilstand.avbryt.load(Ordering::Relaxed) { return Ok(serde_json::json!({ "hasher": hasher, "avbrutt": true })); }
+        match skapflyt::fil_xxh64_meld(std::path::Path::new(&f.sti), Some((&app, f.sti.as_str(), f.bytes))).await {
+            Ok(h) => { hasher.insert(f.sti.clone(), serde_json::json!(h)); }
+            Err(e) => log::warn!("sjekksum før opplasting: {}: {e}", f.sti),
+        }
+    }
+    Ok(serde_json::json!({ "hasher": hasher, "avbrutt": tilstand.avbryt.load(Ordering::Relaxed) }))
 }
 
 /// MINNEKORT-INNLASTING (0.2.0, DIT): kopier fra kort til arkiv/NAS med
@@ -1348,7 +1375,7 @@ pub fn run() {
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
         .invoke_handler(tauri::generate_handler![avbryt_fil, les_lokal,
-            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, opplasting_okt, last_inn, hent_liste, hent_deling, deling_passord, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, ledig_plass, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, sett_framdrift, hold_vaaken, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn, forkast_opplasting, apne_loggmappe, lightroom_status, installer_lightroom])
+            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, send_deling, hash_filer, opplasting_okt, last_inn, hent_liste, hent_deling, deling_passord, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, ledig_plass, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, sett_framdrift, hold_vaaken, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn, forkast_opplasting, apne_loggmappe, lightroom_status, installer_lightroom])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
