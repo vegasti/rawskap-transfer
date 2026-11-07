@@ -1,6 +1,6 @@
 // Nedlasting fra skapet: én fil med Range-resume, omforsøk, og «hva mangler lokalt?».
 use crate::feil::disk;
-use crate::{bare_uten_redirect, fil_xxh64, meld, nettfeil, pause_foer_forsok, sov, trygt_navn, vent_paa_nett, Feil, Fil, Framdrift, Klient, Melder, SjekkFil, Stopp, Struper, NED_FORSOK};
+use crate::{bare_uten_redirect, fil_xxh64, meld, nettfeil, pause_foer_forsok, sov, trygt_navn, vent_paa_mappe, vent_paa_nett, Feil, Fil, Framdrift, Klient, Melder, SjekkFil, Stopp, Struper, NED_FORSOK};
 use futures_util::StreamExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -156,8 +156,24 @@ pub async fn last_ned_en<K: Melder>(
 /// blir det samme. (Før T2 var dette strengtesten `varig_nedlastingsfeil`; `varig()` gir samme svar for alt herfra.)
 pub async fn last_ned_med_forsok<K: Melder>(app: &K, k: &Klient, fil: &Fil, rot: &Path, avbryt: &Stopp, struper: &Struper, konflikt: &str) -> Result<(), Feil> {
     let mut n = 0u32;
+    let mut disk_runder = 0u32;
     loop {
         let e = match last_ned_en(app, k, fil, rot, avbryt, struper, konflikt).await { Ok(()) => return Ok(()), Err(e) => e };
+        // MÅLET ER BORTE (6/11): en NAS som falt ut, en disk som ble koblet fra. Vent på den uten å bruke opp forsøkene,
+        // og fortsett fra .part når den er tilbake. Kommer den ikke, gjelder svaret hele jobben (`Feil::Volum`).
+        // Taket på rundene er bare et vern mot en disk som blinker av og på i det uendelige.
+        if matches!(e, Feil::Disk(_)) && !avbryt.av() && disk_runder < 20 && tokio::fs::metadata(rot).await.is_err() {
+            disk_runder += 1;
+            let (a, id, total) = (app.clone(), fil.id.clone(), fil.bytes);
+            if vent_paa_mappe(rot, Some(avbryt), &move || meld(&a, &id, 0, total, "venterDisk")).await {
+                meld(app, &fil.id, 0, fil.bytes, "nyttForsok");
+                continue;
+            }
+            if avbryt.av() { return Err(Feil::Avbrutt); }
+            let e = Feil::volum_borte(rot);
+            log::warn!("ned feilet: {}: {e}", fil.filnavn);
+            return Err(e);
+        }
         if avbryt.av() || e.varig() || n + 1 >= NED_FORSOK {
             if e != Feil::Avbrutt { log::warn!("ned feilet: {}: {e}", fil.filnavn); }
             return Err(e);

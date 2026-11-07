@@ -117,6 +117,9 @@ pub const NED_LESE_TAK: std::time::Duration = std::time::Duration::from_secs(60)
 pub const STOPP_TAK: u64 = 60;
 /// Så lenge venter vi på at nettet kommer tilbake før et forsøk gis opp (tidsenheter).
 pub const NETT_VENT_TAK: u64 = 600;
+/// Så lenge venter en fil på at disken den skal til eller fra kommer tilbake (tidsenheter): en NAS som starter på nytt,
+/// en nettverksstasjon som kobles til igjen etter dvale.
+pub const DISK_VENT_TAK: u64 = 1800;
 pub const DEL_FORSOK: u32 = 6;
 pub const ENKEL_FORSOK: u32 = 5;
 pub const PORTAL_FORSOK: u32 = 5;
@@ -201,6 +204,28 @@ pub async fn vent_paa_nett(portal: &str, avbryt: Option<&Stopp>, meld_venter: &(
         if !venter { venter = true; meld_venter(); log::warn!("får ikke kontakt med portalen — venter på nettet"); }
         if start.elapsed() >= enheter(NETT_VENT_TAK) { log::warn!("nettet kom ikke tilbake på {} s — gir opp forsøket", start.elapsed().as_secs()); return false; }
         tokio::time::sleep(enheter(5)).await;
+    }
+}
+
+/// Venter til mappa finnes igjen (6/11). En jobb mot en NAS som faller ut, ga før én feil per fil — hver med sine seks
+/// forsøk — og måtte startes på nytt for hånd. Nå venter fila, og fortsetter når disken er tilbake (en nedlasting fra
+/// .part-fila). Gir `false` hvis mappa ikke kom tilbake innen DISK_VENT_TAK, eller brukeren avbrøt imens. `meld_venter`
+/// kalles én gang, i det vi faktisk begynner å vente.
+///
+/// ⚠ Kalles bare når mappa FAKTISK mangler. En mappe som finnes, men ikke kan skrives til (rettigheter, låst fil), er
+/// en vanlig `Disk`-feil og går gjennom de vanlige forsøkene.
+pub async fn vent_paa_mappe(mappe: &std::path::Path, avbryt: Option<&Stopp>, meld_venter: &(dyn Fn() + Send + Sync)) -> bool {
+    let start = std::time::Instant::now();
+    let mut venter = false;
+    loop {
+        if avbryt.map(|a| a.av()).unwrap_or(false) { return false; }
+        if tokio::fs::metadata(mappe).await.is_ok() {
+            if venter { log::info!("{} er tilbake etter {} s", mappe.display(), start.elapsed().as_secs()); }
+            return true;
+        }
+        if !venter { venter = true; meld_venter(); log::warn!("finner ikke {} — venter på disken", mappe.display()); }
+        if start.elapsed() >= enheter(DISK_VENT_TAK) { log::warn!("{} kom ikke tilbake på {} s — gir opp", mappe.display(), start.elapsed().as_secs()); return false; }
+        sov(enheter(5), avbryt).await;
     }
 }
 

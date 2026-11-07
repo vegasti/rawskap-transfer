@@ -135,9 +135,33 @@ fn feiltekstene_er_som_foer() {
         (Feil::server(0, "302 uten Location"), false),
         (Feil::Nett("Lageret svarte 403".into()), false),
         (Feil::Disk("ingen plass".into()), false),
+        (Feil::Volum("Ikke nok plass på disken".into()), true),
     ] { assert_eq!(e.varig(), varig, "{e}"); }
     assert!(!Feil::VersjonAv { kode: "midlertidig".into(), ryddet: false, id: None, tekst: String::new() }.varig());
     assert!(Feil::VersjonAv { kode: "slettet".into(), ryddet: true, id: None, tekst: String::new() }.varig());
+}
+
+/// Feil som gjelder hele jobben (6/11): de andre filene får samme svar, så jobben prøver dem ikke én for én. Det som
+/// gjelder én fil (sperret, nettet, en låst fil, portalens 404), gjør det ikke.
+#[test]
+fn feil_som_gjelder_hele_jobben() {
+    for (e, alle) in [
+        (Feil::IkkeTilgang("Nøkkelen er ugyldig — lag en ny".into()), true),
+        (Feil::KvoteFull("Lagringen er full".into()), true),
+        (Feil::DelingLaast(String::new()), true),
+        (Feil::Volum("Ikke nok plass på disken".into()), true),
+        (Feil::Sperret("Blokkert (samtykke trukket/utløpt)".into()), false),
+        (Feil::server(404, "Portalen svarte 404"), false),
+        (Feil::Nett("Lageret svarte 500".into()), false),
+        (Feil::Disk("Prosessen får ikke tilgang til filen".into()), false),
+        (Feil::Avbrutt, false),
+    ] { assert_eq!(e.gjelder_jobben(), alle, "{e}"); }
+    // En full disk kjennes igjen på systemets kode, ikke på teksten (som er på maskinens språk).
+    let full = std::io::Error::from_raw_os_error(if cfg!(windows) { 112 } else { 28 });
+    assert_eq!(crate::feil::disk(full), Feil::Volum("Ikke nok plass på disken".into()));
+    let annen = std::io::Error::from_raw_os_error(if cfg!(windows) { 5 } else { 13 });
+    assert!(matches!(crate::feil::disk(annen), Feil::Disk(_)));
+    assert_eq!(Feil::volum_borte(Path::new("Y:/Jobb")).to_string(), "Finner ikke Y:/Jobb — er disken koblet fra?");
 }
 
 // ── MOT DEN FALSKE PORTALEN (testportal) ──
@@ -909,6 +933,53 @@ fn nedlasting_fortsetter_etter_kutt() {
         assert!(std::fs::read(rot.join("ned.bin")).unwrap() == data, "nedlastet fil er ikke lik originalen");
         let l = m.lager.lock().unwrap();
         assert_eq!(l.ned_range, vec![None, Some(1 << 20)], "andre forsøk skal fortsette der det første slapp");
+    });
+}
+
+/// Målet forsvinner (en NAS som faller ut, 6/11): fila venter på disken uten å bruke opp forsøkene, sier det i lista,
+/// og laster ned når mappa er tilbake. «Disken» her er en mappe som ikke kan lages fordi en FIL står der den skal ligge.
+#[test]
+fn nedlasting_venter_paa_disken_som_ble_borte() {
+    med_app(|_| async move {
+        let m = start_mock().await;
+        let data = testdata(1 << 20, 9);
+        m.lager.lock().unwrap().nedlasting = data.clone();
+        let base = std::env::temp_dir().join("rawskap-transfer-test").join("disk-borte");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let blokk = base.join("nas");
+        std::fs::write(&blokk, b"ikke en mappe").unwrap();
+        let rot = blokk.join("Jobb");
+        let app = Opptak::ny(PathBuf::new());
+        // «Disken kommer tilbake» når lista har sagt at fila venter: fila som sperret, byttes med mappa.
+        let (b, r, a) = (blokk.clone(), rot.clone(), app.clone());
+        tokio::spawn(async move {
+            for _ in 0..750 { if a.statuser().iter().any(|s| s == "venterDisk") { break; } tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            std::fs::remove_file(&b).unwrap();
+            std::fs::create_dir_all(&r).unwrap();
+        });
+        let fil = Fil { id: "d1".into(), filnavn: "ned.bin".into(), bytes: data.len() as u64, sti: String::new(), xxh64: hash(&data), url: String::new() };
+        let res = last_ned_med_forsok(&app, &klient(&m), &fil, &rot, &stopp("d1"), &Struper::ny(Arc::new(AtomicU64::new(0))), "hopp").await;
+        assert_eq!(res, Ok(()));
+        assert!(std::fs::read(rot.join("ned.bin")).unwrap() == data);
+        let s = app.statuser();
+        assert!(s.contains(&"venterDisk".to_string()), "lista skal si at fila venter på disken: {s:?}");
+        assert_eq!(s.last().map(String::as_str), Some("verifisert"), "{s:?}");
+    });
+}
+
+/// Venter man på en disk som ikke kommer, og brukeren avbryter, svarer ventingen med én gang (ikke etter taket).
+#[test]
+fn ventingen_paa_disken_kan_avbrytes() {
+    med_app(|_| async move {
+        let st = stopp("x");
+        let (g, start) = (st.global.clone(), std::time::Instant::now());
+        tokio::spawn(async move { tokio::time::sleep(std::time::Duration::from_millis(300)).await; g.store(true, Ordering::Relaxed); });
+        let kom = vent_paa_mappe(Path::new("Q:/finnes/ikke/rawskap-test"), Some(&st), &|| {}).await;
+        assert!(!kom);
+        // Taket er 1800 enheter à 20 ms = 36 s; avbruddet kommer etter 0,3 s. God margin for en maskin under last.
+        assert!(start.elapsed() < std::time::Duration::from_secs(15), "avbrudd skal gjelde med én gang: {:?}", start.elapsed());
     });
 }
 

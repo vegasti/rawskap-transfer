@@ -77,6 +77,18 @@ async fn hent_liste(portal: String, nokkel: String, mappe: String) -> Result<ser
     Ok(skapflyt::hent_liste(&klient(&portal, &nokkel)?, &mappe).await?)
 }
 
+/// Feil som gjelder HELE jobben (6/11, `Feil::gjelder_jobben`): utgått nøkkel, låst deling, fullt skap, full disk, en
+/// disk som ble borte. Den første settes her, og filene som ennå ikke har startet får den uten å røre nett eller disk —
+/// før ga det én feil per fil (144 like feil i én nedlasting). Filene som alt går, gjør seg ferdig eller feiler selv.
+#[derive(Clone, Default)]
+struct Jobbstopp(Arc<std::sync::Mutex<Option<String>>>);
+impl Jobbstopp {
+    fn sett(&self, e: &Feil) {
+        if e.gjelder_jobben() { if let Ok(mut s) = self.0.lock() { s.get_or_insert_with(|| e.to_string()); } }
+    }
+    fn grunn(&self) -> Option<String> { self.0.lock().ok().and_then(|s| s.clone()) }
+}
+
 /// Last ned et sett filer til en mappe — `parallell` samtidige strømmer.
 #[tauri::command]
 async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String, nokkel: String, filer: Vec<Fil>, maal: String, parallell: usize, logg: bool, jobbnavn: String, konflikt: String) -> Result<serde_json::Value, String> {
@@ -102,18 +114,26 @@ async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
     let avbrutte = tilstand.avbrutte.clone();
     if let Ok(mut s) = avbrutte.lock() { s.clear(); }
     let struper = Struper::ny(tilstand.ned_mbps.clone());
+    let jobbstopp = Jobbstopp::default();
     let mut jobber = Vec::new();
     for fil in filer {
-        let (app, k, rot, sem, loggen, struper) = (app.clone(), k.clone(), rot.clone(), sem.clone(), loggen.clone(), struper.clone());
+        let (app, k, rot, sem, loggen, struper, jobbstopp) = (app.clone(), k.clone(), rot.clone(), sem.clone(), loggen.clone(), struper.clone(), jobbstopp.clone());
         let avbryt = Stopp { global: avbryt.clone(), sett: avbrutte.clone(), id: fil.id.clone() };
         let konflikt = konflikt.clone();
         jobber.push(tokio::spawn(async move {
             let _p = sem.acquire().await;
+            if let Some(e) = jobbstopp.grunn().filter(|_| !avbryt.av()) {
+                let _ = app.framdrift(Framdrift { id: fil.id.clone(), hentet: 0, total: fil.bytes, status: "feil".into(), feil: Some(e.clone()) });
+                if let Some(l) = &loggen { l.skriv(&format!("⏹ Ikke startet          | ID: {} | {}", fil.id, e)).await; }
+                return (fil.id.clone(), Err::<(), String>(e));
+            }
             let sti = if fil.sti.is_empty() { rot.join(trygt_navn(&fil.filnavn)) } else { rot.join(&fil.sti).join(trygt_navn(&fil.filnavn)) };
             if let Some(l) = &loggen { l.skriv(&format!("🚀 Startet                | ID: {} | {}", fil.id, sti.display())).await; }
             if avbryt.av() { return (fil.id.clone(), Err::<(), String>("Avbrutt".into())); }
             let _ = app.framdrift(Framdrift { id: fil.id.clone(), hentet: 0, total: fil.bytes, status: "laster".into(), feil: None });
-            let res = last_ned_med_forsok(&app, &k, &fil, &rot, &avbryt, &struper, &konflikt).await.map_err(String::from);
+            let res = last_ned_med_forsok(&app, &k, &fil, &rot, &avbryt, &struper, &konflikt).await;
+            if let Err(e) = &res { jobbstopp.sett(e); }
+            let res = res.map_err(String::from);
             if let Err(e) = &res {
                 let _ = app.framdrift(Framdrift { id: fil.id.clone(), hentet: 0, total: fil.bytes, status: "feil".into(), feil: Some(e.clone()) });
                 if let Some(l) = &loggen { l.skriv(&format!("❌ {:<22} | ID: {} | {}", if e == "Avbrutt" { "Avbrutt" } else { "Feilet" }, fil.id, e)).await; }
@@ -519,13 +539,18 @@ async fn last_opp(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
     let struper = Struper::ny(tilstand.opp_mbps.clone());
     // Én del om gangen per fil (filene går i parallell i stedet), tilstanden der den alltid har ligget.
     let valg = Valg { tilstand_dir: resume_dir(), struper: Some(struper), ..Valg::default() };
+    let jobbstopp = Jobbstopp::default();
     let mut jobber = Vec::new();
     for fil in filer {
-        let (app, k, cache, sem, mappe_id, valg) = (app.clone(), k.clone(), cache.clone(), sem.clone(), mappe_id.clone(), valg.clone());
+        let (app, k, cache, sem, mappe_id, valg, jobbstopp) = (app.clone(), k.clone(), cache.clone(), sem.clone(), mappe_id.clone(), valg.clone(), jobbstopp.clone());
         let avbryt = Stopp { global: avbryt.clone(), sett: avbrutte.clone(), id: fil.sti.clone() };
         jobber.push(tokio::spawn(async move {
             let _p = sem.acquire().await;
             if avbryt.av() { return (fil.sti.clone(), Err::<(), String>("Avbrutt".into())); }
+            if let Some(e) = jobbstopp.grunn() {
+                let _ = app.framdrift(Framdrift { id: fil.sti.clone(), hentet: 0, total: fil.bytes, status: "feil".into(), feil: Some(e.clone()) });
+                return (fil.sti.clone(), Err(e));
+            }
             let _ = app.framdrift(Framdrift { id: fil.sti.clone(), hentet: 0, total: fil.bytes, status: "laster".into(), feil: None });
             let rel_dir = std::path::Path::new(&fil.relativ).parent().map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
             log::info!("opp start: {} ({} B)", fil.relativ, fil.bytes);
@@ -534,21 +559,31 @@ async fn last_opp(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
                     // To filforsøk. Hvert har egne omforsøk per del/PUT; dette laget tar det som krever
                     // å begynne på nytt (utløpt signatur på en enkel PUT, sammensetting som feilet).
                     let f = skapflyt::opplasting::Fil::fra_sti(&fil.sti, &mid);
-                    let mut r: Result<(), Feil> = Err(Feil::Avbrutt);
-                    for forsok in 0..2u32 {
-                        r = skapflyt::last_opp(&app, &k, &f, &valg, &avbryt).await.map(|_| ());
-                        match &r {
-                            Ok(()) => break,
-                            Err(e) if avbryt.av() || matches!(e, Feil::IkkeTilgang(_)) => break,
-                            Err(e) => {
-                                log::warn!("opp {} filforsøk {} feilet: {e}", fil.relativ, forsok + 1);
-                                if forsok == 0 { sov(pause_foer_forsok(1), Some(&avbryt)).await; }
+                    let kilde = Path::new(&fil.sti).parent().map(Path::to_path_buf);
+                    let (mut forsok, mut disk_runder) = (0u32, 0u32);
+                    let r = loop {
+                        let e = match skapflyt::last_opp(&app, &k, &f, &valg, &avbryt).await { Ok(_) => break Ok(()), Err(e) => e };
+                        if avbryt.av() || e.gjelder_jobben() { break Err(e); }
+                        // KILDEN ER BORTE (6/11): opplasting fra en NAS som falt ut. Vent på den uten å bruke opp
+                        // forsøkene; gjenopptaket fortsetter fra delen lageret har. Kommer den ikke, gjelder det jobben.
+                        if let (Feil::Disk(_), Some(kilde)) = (&e, &kilde) {
+                            if disk_runder < 20 && tokio::fs::metadata(kilde).await.is_err() {
+                                disk_runder += 1;
+                                let (a, id, total) = (app.clone(), fil.sti.clone(), fil.bytes);
+                                let meld = move || { let _ = a.framdrift(Framdrift { id: id.clone(), hentet: 0, total, status: "venterDisk".into(), feil: None }); };
+                                if skapflyt::vent_paa_mappe(kilde, Some(&avbryt), &meld).await { continue; }
+                                break Err(if avbryt.av() { Feil::Avbrutt } else { Feil::volum_borte(kilde) });
                             }
                         }
-                    }
+                        log::warn!("opp {} filforsøk {} feilet: {e}", fil.relativ, forsok + 1);
+                        forsok += 1;
+                        if forsok >= 2 { break Err(e); }
+                        sov(pause_foer_forsok(1), Some(&avbryt)).await;
+                    };
+                    if let Err(e) = &r { jobbstopp.sett(e); }
                     r.map_err(String::from)
                 }
-                Err(e) => Err(String::from(e)),
+                Err(e) => { jobbstopp.sett(&e); Err(String::from(e)) }
             };
             match &res {
                 Ok(()) => log::info!("opp ferdig: {}", fil.relativ),
@@ -1389,6 +1424,23 @@ pub fn run() {
 #[cfg(test)]
 mod tester {
     use super::*;
+
+    /// Jobbstoppen (6/11): bare feil som gjelder hele jobben stopper resten, og den første grunnen står.
+    #[test]
+    fn jobbstoppen_husker_den_forste_grunnen_som_gjelder_alle() {
+        let s = Jobbstopp::default();
+        s.sett(&Feil::Nett("Lageret svarte 500".into()));
+        s.sett(&Feil::Sperret("Blokkert (samtykke trukket/utløpt)".into()));
+        s.sett(&Feil::Avbrutt);
+        assert_eq!(s.grunn(), None, "feil på én fil skal ikke stoppe de andre");
+        let kopi = s.clone();
+        kopi.sett(&Feil::Volum("Ikke nok plass på disken".into()));
+        s.sett(&Feil::IkkeTilgang("Nøkkelen er ugyldig — lag en ny".into()));
+        assert_eq!(s.grunn().as_deref(), Some("Ikke nok plass på disken"), "klonene deler stoppen, og den første grunnen står");
+        let laast = Jobbstopp::default();
+        laast.sett(&Feil::DelingLaast(String::new()));
+        assert_eq!(laast.grunn().as_deref(), Some("DELING_LAAST"), "grensesnittet kjenner igjen signalet og spør om passordet");
+    }
 
     /// Hold maskinen våken (6/11): vakta tas og slippes, og et nytt «på» mens den holder lager ikke en ny.
     #[cfg(any(target_os = "windows", target_os = "macos"))]

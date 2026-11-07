@@ -534,6 +534,43 @@ window.__TAURI__ = (() => {
       sjekk('og det skjer FØR økta lukkes', s2.sendIndeks >= 0 && s2.oktFerdig > s2.sendIndeks, true);
     }
 
+    console.log('\n7g. Feil som gjelder hele jobben, og disken som ble borte (6/11)');
+    await send('Page.navigate', { url: 'file:///' + fil.replace(/\\/g, '/') });
+    await sov(3000);
+    const hj = await ev(`(async () => {
+      const v = ms => new Promise(r => setTimeout(r, ms));
+      const $ = id => document.getElementById(id);
+      const hf = window.__rawskapOverf.hovedFeil;
+      const regel = [
+        hf([{ feil: 'A' }, { feil: 'A' }, { feil: 'B' }]),
+        hf([{ feil: 'A' }, { feil: 'B' }]),
+        hf([{ feil: 'Avbrutt' }, { feil: 'Avbrutt' }, { feil: 'A' }]),
+        hf([]),
+      ];
+      document.querySelector('#filer .filrad.mappe').click(); await v(600);
+      window.__svar = { last_ned: () => new Promise(r => { window.__slipp = r; }) };
+      $('folg-mappe').click(); await v(900);
+      window.__send('framdrift', { id: 'a3', hentet: 0, total: 67000000, status: 'venterDisk' });
+      await v(50);
+      const venter = (document.querySelector('#f-a3 .status') || {}).textContent;
+      window.__slipp({ ok: 0, feil: [{ id: 'a3', feil: 'Ikke nok plass på disken' }, { id: 'b2', feil: 'Ikke nok plass på disken' }] });
+      await v(500);
+      $('folg-mappe').click(); await v(200);
+      const k = (window.__butikk.get('ko') || [])[0] || {};
+      const rad = (document.querySelector('#jb-' + k.id + ' .st') || {}).textContent;
+      const varsel = (window.__varsler || []).filter(x => /feilet/.test(x.title)).map(x => x.body).pop();
+      const hist = (window.__butikk.get('historikk') || [])[0] || {};
+      $('ofane-hist').click(); await v(100);
+      const histRad = ($('hist-panel').querySelector('.jobbrad:not(.hode) .st') || {}).textContent;
+      window.__svar = {};
+      return { regel, venter, status: k.status, rad, varsel, aarsak: hist.aarsak, histRad };
+    })()`);
+    sjekk('grunnen er den flest feilet med (over halvparten), «Avbrutt» teller ikke', hj.regel, ['A', '', 'A', '']);
+    sjekk('fila sier at den venter på disken', hj.venter, 'venter på disken …');
+    sjekk('jobben feilet og raden sier hvorfor', [hj.status, /2 feilet: Ikke nok plass på disken/.test(hj.rad || '')], ['feil', true]);
+    sjekk('skrivebordsvarselet sier hvorfor', /2 feilet: Ikke nok plass på disken$/.test(hj.varsel || ''), true);
+    sjekk('historikken husker grunnen', [hj.aarsak, /2 feilet: Ikke nok plass på disken/.test(hj.histRad || '')], ['Ikke nok plass på disken', true]);
+
     console.log('\n8. Konsoll');
     const konsoll = feil.filter(f => typeof f === 'string' && /Error|error/.test(f));
     sjekk('ingen unntak i konsollen', konsoll.length, 0);
