@@ -728,6 +728,45 @@ mod vaaken {
 #[tauri::command]
 fn hold_vaaken(paa: bool) -> bool { vaaken::sett(paa) }
 
+// Lokket (8/11, Vegard «ja»): appen endrer ALDRI hva Windows gjør når lokket lukkes. Den innstillingen gjelder hele
+// maskinen, en krasj ville latt den stå, og en bærbar som jobber i en sekk blir varm. Innstillinger → Bakgrunn viser
+// bare en linje på en maskin med lokk, med en knapp til Windows' egen side. Mac: ingen linje (lokket kan ikke
+// overstyres der uten ekstern skjerm eller administrator).
+mod lokk {
+    /// Har maskinen et lokk? Windows: `GetPwrCapabilities().LidPresent`, som er det Windows selv bruker for å vise
+    /// «Når jeg lukker lokket». En stasjonær med UPS har batteri, men ikke lokk, så batteriet er ikke testen.
+    #[cfg(target_os = "windows")]
+    pub fn finnes() -> bool {
+        use windows_sys::Win32::System::Power::{GetPwrCapabilities, SYSTEM_POWER_CAPABILITIES};
+        // SAFETY: strukturen er ren data (alle nuller er gyldig, også `bool`-feltene), og pekeren lever gjennom kallet.
+        // windows-sys 0.61 gir BOOLEAN som `bool`.
+        let mut k: SYSTEM_POWER_CAPABILITIES = unsafe { std::mem::zeroed() };
+        let ok = unsafe { GetPwrCapabilities(&mut k) };
+        ok && k.LidPresent
+    }
+    #[cfg(not(target_os = "windows"))]
+    pub fn finnes() -> bool { false }
+
+    /// Åpner Windows' side for av/på-knappen og lokket (Kontrollpanel → Strømalternativer → «Velg hva av/på-knappene
+    /// gjør»). Finnes fra Windows 7 til 11; `ms-settings:powersleep` er reserven hvis kontrollpanelet ikke starter.
+    #[cfg(target_os = "windows")]
+    pub fn aapne() -> Result<(), String> {
+        let kp = std::process::Command::new("control.exe")
+            .args(["/name", "Microsoft.PowerOptions", "/page", "pageGlobalSettings"]).spawn();
+        if kp.is_ok() { return Ok(()); }
+        std::process::Command::new("explorer.exe").arg("ms-settings:powersleep").spawn()
+            .map(|_| ()).map_err(|e| format!("{e}"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    pub fn aapne() -> Result<(), String> { Err("bare på Windows".into()) }
+}
+
+#[tauri::command]
+fn har_lokk() -> bool { lokk::finnes() }
+
+#[tauri::command]
+fn aapne_lokk_innstilling() -> Result<(), String> { lokk::aapne() }
+
 #[tauri::command]
 async fn sjekk_versjon() -> Result<String, String> {
     let r = reqwest::Client::builder()
@@ -1410,7 +1449,7 @@ pub fn run() {
         .manage(Tilstand::default())
         .manage(SynkTilstand::default())
         .invoke_handler(tauri::generate_handler![avbryt_fil, les_lokal,
-            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, send_deling, hash_filer, opplasting_okt, last_inn, hent_liste, hent_deling, deling_passord, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, ledig_plass, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, sett_framdrift, hold_vaaken, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn, forkast_opplasting, apne_loggmappe, lightroom_status, installer_lightroom])
+            mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, send_deling, hash_filer, opplasting_okt, last_inn, hent_liste, hent_deling, deling_passord, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, ledig_plass, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, sett_framdrift, hold_vaaken, har_lokk, aapne_lokk_innstilling, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn, forkast_opplasting, apne_loggmappe, lightroom_status, installer_lightroom])
         .run(tauri::generate_context!())
         .expect("Rawskap Transfer kunne ikke starte");
 }
@@ -1450,6 +1489,15 @@ mod tester {
         assert!(vaaken::sett(true), "andre «på» skal beholde vakta");
         assert!(!vaaken::sett(false));
         assert!(vaaken::VAKT.lock().unwrap().is_none());
+    }
+
+    /// Lokket (8/11): spørsmålet går rett til Windows og svarer det samme hver gang; utenfor Windows er svaret nei.
+    #[test]
+    fn lokket_spoerres_uten_aa_endre_noe() {
+        let a = lokk::finnes();
+        assert_eq!(a, lokk::finnes());
+        #[cfg(not(target_os = "windows"))]
+        assert!(!a);
     }
 
     /// `ledig_plass` må tåle at målmappa ikke finnes ennå — den lages først når

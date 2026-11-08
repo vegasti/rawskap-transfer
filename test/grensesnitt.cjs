@@ -55,6 +55,8 @@ window.__TAURI__ = (() => {
     if (cmd === 'mangler_lokalt') return ['a3', 'b2'];
     if (cmd === 'sjekk_versjon') return { ny: false };
     if (cmd === 'maskinnavn') return 'rigg';
+    // Lokket (8/11): ?lokk=1 er en bærbar; ellers en maskin uten lokk.
+    if (cmd === 'har_lokk') return /[?&]lokk=1/.test(location.search);
     // «Denne maskinen» (0.3.6): stasjonslista finnes, alt under den feiler — som en fjernet disk.
     if (cmd === 'les_lokal') { if (!args || !args.sti) return { mapper: ['C:\\\\'], filer: [], rot: true }; throw 'No such file or directory (os error 2)'; }
     if (cmd === 'lightroom_status') return { lightroom: true, installert: '1.1.0', tilgjengelig: '1.2.1', sti: 'C:/rigg/Modules/rawskap.lrdevplugin' };
@@ -352,6 +354,21 @@ window.__TAURI__ = (() => {
     sjekk('aldri to like kall på rad', vaak.every((v, i) => i === 0 || v !== vaak[i - 1]), true);
     sjekk('bryteren står på som standard', await ev(`(async () => { document.getElementById('vis-innst').click(); await new Promise(r => setTimeout(r, 150)); return document.getElementById('p-vaaken').checked; })()`), true);
     sjekk('og huskes når den slås av', await ev(`(async () => { const b = document.getElementById('p-vaaken'); b.checked = false; b.dispatchEvent(new Event('change')); await new Promise(r => setTimeout(r, 150)); return window.__butikk.get('pref').vaaken; })()`), false);
+
+    // Lokket (8/11): linja står bare på en maskin med lokk, og knappen åpner Windows' side — appen endrer ingenting selv.
+    sjekk('uten lokk: ingen lokk-linje', await ev(`document.getElementById('lokk-rad').hidden`), true);
+    for (const [q, tekst] of [['?lokk=1', /^Lukker du lokket, sover maskinen$/], ['?lokk=1&en=1', /^Closing the lid puts the computer to sleep$/]]) {
+      await send('Page.navigate', { url: 'file:///' + fil.replace(/\\/g, '/') + q });
+      await sov(3000);
+      const l = JSON.parse(await ev(`(async () => { document.getElementById('vis-innst').click(); await new Promise(r => setTimeout(r, 150)); const rad = document.getElementById('lokk-rad');
+        document.getElementById('p-lokk').click(); await new Promise(r => setTimeout(r, 50));
+        return JSON.stringify({ vist: !rad.hidden && rad.offsetParent !== null, tekst: rad.querySelector('.tekst').textContent, knapp: document.getElementById('p-lokk').textContent,
+          aapnet: window.__kall.filter(k => k.cmd === 'aapne_lokk_innstilling').length, endret: window.__kall.some(k => /powercfg|lokk_sett|sett_lokk/.test(k.cmd)) }); })()`));
+      sjekk(`med lokk (${q}): linja vises`, l.vist, true);
+      sjekk(`med lokk (${q}): teksten`, tekst.test(l.tekst), true);
+      sjekk(`med lokk (${q}): knappen åpner Windows-siden én gang`, l.aapnet, 1);
+      sjekk(`med lokk (${q}): appen endrer ingenting selv`, l.endret, false);
+    }
 
     await send('Page.navigate', { url: 'file:///' + fil.replace(/\\/g, '/') + '?inn=1' });
     await sov(3000);
