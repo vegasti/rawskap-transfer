@@ -1,8 +1,8 @@
-# Rawskap Transfer
+# Rawbyte Transfer
 
-Skrivebordsapp (Tauri 2) for store opp- og nedlastinger mot [Rawskap](https://rawskap.no) —
+Skrivebordsapp (Tauri 2) for store opp- og nedlastinger mot [Rawbyte](https://rawbyte.no) (het Rawskap til 13/11-2026 — repoet, binæren og interne navn står) —
 Raw Studios' mediebibliotek. Kø med gjenopptak, mappesynk, semantisk søk i skapet,
-`rawskap://`-deep-links for delinger, og poster/scrubbe-sprites via ffmpeg.
+`rawskap://`- og `rawbyte://`-deep-links for delinger, og poster/scrubbe-sprites via ffmpeg.
 
 ## Bygg
 

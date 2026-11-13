@@ -22,7 +22,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh run download ${{ inputs.run_id }} -R ${{ github.repository }} -n Rawskap-Transfer-macOS-${{ inputs.arch }} -D dmg
+          gh run download ${{ inputs.run_id }} -R ${{ github.repository }} -n Rawbyte-Transfer-macOS-${{ inputs.arch }} -D dmg
           find dmg -name '*.dmg'
 
       - name: Staple + verifiser
@@ -31,11 +31,11 @@ jobs:
           xcrun stapler staple "$DMG"
           xcrun stapler validate "$DMG"
           spctl -a -t open --context context:primary-signature -vv "$DMG" || true
-          mkdir ut && cp "$DMG" "ut/Rawskap-Transfer.dmg"
+          mkdir ut && cp "$DMG" "ut/Rawbyte-Transfer.dmg"
 
       - uses: actions/upload-artifact@v5
         with:
-          name: Rawskap-Transfer-macOS-${{ inputs.arch }}-stapled
+          name: Rawbyte-Transfer-macOS-${{ inputs.arch }}-stapled
           retention-days: 3   # (22/10) installerne publiseres til R2 rett etter bygget — 90 dager fylte Actions-lagringen (0,5 GB inkludert)
-          path: ut/Rawskap-Transfer.dmg
+          path: ut/Rawbyte-Transfer.dmg
           if-no-files-found: error

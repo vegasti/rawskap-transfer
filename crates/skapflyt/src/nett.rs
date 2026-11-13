@@ -62,7 +62,7 @@ pub struct Konto { pub portal: String, pub nokkel: String }
 pub struct Klient { portal: String, api: reqwest::Client, opp: reqwest::Client, ned: reqwest::Client }
 
 impl Klient {
-    /// ⚠ `ua` er appens User-Agent («RawskapTransfer/0.3.7») og MÅ komme fra appen: et
+    /// ⚠ `ua` er appens User-Agent («RawbyteTransfer/0.4.1») og MÅ komme fra appen: et
     /// `env!("CARGO_PKG_VERSION")` her ville gitt cratens versjon, og portalloggene hadde vist feil app.
     pub fn ny(konto: &Konto, ua: &str) -> Result<Klient, Feil> {
         let mut h = reqwest::header::HeaderMap::new();

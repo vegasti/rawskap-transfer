@@ -91,7 +91,7 @@ pub struct Valg {
     pub plassering: Plassering,
     /// Filer som kopieres samtidig (1–8). Kort leses best i rekkefølge, så 1 er standard.
     pub samtidig: usize,
-    /// Appen og versjonen, til kvitteringen («RawskapTransfer/0.3.7»).
+    /// Appen og versjonen, til kvitteringen («RawbyteTransfer/0.4.1»).
     pub app: String,
 }
 

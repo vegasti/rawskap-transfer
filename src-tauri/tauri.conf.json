@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Rawskap Transfer",
-  "version": "0.4.0",
+  "productName": "Rawbyte Transfer",
+  "version": "0.4.1",
   "identifier": "no.rawstudios.rawskap-transfer",
   "build": {
     "frontendDist": "../src"
@@ -9,7 +9,7 @@
   "app": {
     "windows": [
       {
-        "title": "Rawskap Transfer",
+        "title": "Rawbyte Transfer",
         "width": 1180,
         "height": 760,
         "resizable": true,
@@ -44,7 +44,8 @@
     ],
     "windows": {
       "nsis": {
-        "installerIcon": "icons/icon.ico"
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "windows/navnebytte.nsh"
       }
     },
     "createUpdaterArtifacts": true
@@ -53,14 +54,15 @@
     "deep-link": {
       "desktop": {
         "schemes": [
-          "rawskap"
+          "rawskap",
+          "rawbyte"
         ]
       }
     },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFBMDlEQjkzQzJBNkQ0N0UKUldSKzFLYkNrOXNKcWkrZ3c3RGhXR3h6blhQYkRseFA5anZoRFZHWVA5dVZ1cUY5YWN0YjNLeksK",
       "endpoints": [
-        "https://rawskap.no/api/transfer/oppdatering?ver={{current_version}}&mal={{target}}-{{arch}}"
+        "https://rawbyte.no/api/transfer/oppdatering?ver={{current_version}}&mal={{target}}-{{arch}}"
       ]
     }
   }

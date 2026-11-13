@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// User-Agent i testene. Den falske portalen ser ikke på den.
-const UA: &str = "RawskapTransfer/test";
+const UA: &str = "RawbyteTransfer/test";
 
 /// Delene skal dekke fila NØYAKTIG én gang: ingen hull, ingen overlapp, siste del kortere.
 /// Kjøres for flere delstørrelser fordi tallet ble endret 17/9 (64 → 16 MB) mens gamle,

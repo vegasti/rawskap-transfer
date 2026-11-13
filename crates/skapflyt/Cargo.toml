@@ -1,7 +1,7 @@
 [package]
 name = "skapflyt"
 version = "0.2.1"
-description = "Overføringsmotoren fra Rawskap Transfer: nett, opplasting med gjenopptak, nedlasting, kobling, mapper og delinger mot Rawskap"
+description = "Overføringsmotoren fra Rawbyte Transfer: nett, opplasting med gjenopptak, nedlasting, kobling, mapper og delinger mot Rawbyte"
 authors = ["Raw Studios AS"]
 license = "MIT"
 repository = "https://github.com/vegasti/rawskap-transfer"

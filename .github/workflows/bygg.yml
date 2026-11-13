@@ -1,5 +1,5 @@
 # macOS-BYGGET (24/8): GitHub sin Mac-runner bygger, signerer og notariserer
-# Rawskap Transfer helt uten at vi eier en Mac. Tauri leser APPLE_*-envene selv:
+# Rawbyte Transfer helt uten at vi eier en Mac. Tauri leser APPLE_*-envene selv:
 # p12-en importeres i en midlertidig keychain, appen signeres med Developer ID,
 # og notarytool kjører med App Store Connect-API-nøkkelen (ingen 2FA i CI).
 # ffmpeg-sidecaren (statisk arm64, martin-riedl.de) lastes ned i CI — binærfiler
@@ -78,7 +78,7 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: Rawskap-Transfer-macOS-arm64
+          name: Rawbyte-Transfer-macOS-arm64
           retention-days: 3   # (22/10) installerne publiseres til R2 rett etter bygget — 90 dager fylte Actions-lagringen (0,5 GB inkludert)
           path: |
             src-tauri/target/release/bundle/dmg/*.dmg
@@ -131,7 +131,7 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: Rawskap-Transfer-macOS-x86_64
+          name: Rawbyte-Transfer-macOS-x86_64
           retention-days: 3   # (22/10) installerne publiseres til R2 rett etter bygget — 90 dager fylte Actions-lagringen (0,5 GB inkludert)
           path: |
             src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
@@ -182,7 +182,7 @@ jobs:
 
       - uses: actions/upload-artifact@v5
         with:
-          name: Rawskap-Transfer-Windows-x64
+          name: Rawbyte-Transfer-Windows-x64
           retention-days: 3   # (22/10) installerne publiseres til R2 rett etter bygget — 90 dager fylte Actions-lagringen (0,5 GB inkludert)
           path: |
             src-tauri/target/release/bundle/nsis/*.exe

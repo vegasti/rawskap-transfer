@@ -64,7 +64,7 @@ fn sett_nettverk(tilstand: State<'_, Tilstand>, ned_mbps: u64, opp_mbps: u64) {
 }
 
 /// User-Agent mot portalen. Appens versjon, ikke cratens — portalloggene skal vise hvilken app som snakker.
-const UA: &str = concat!("RawskapTransfer/", env!("CARGO_PKG_VERSION"));
+const UA: &str = concat!("RawbyteTransfer/", env!("CARGO_PKG_VERSION"));
 
 /// Klientene mot skapet (T2): portal-, PUT- og GET-klienten med Transfers tak og UA. Én per kommando, sendt rundt.
 fn klient(portal: &str, nokkel: &str) -> Result<Klient, String> {
@@ -99,7 +99,7 @@ async fn last_ned(app: AppHandle, tilstand: State<'_, Tilstand>, portal: String,
     let loggen: Option<Arc<Logg>> = if logg {
         let navn = format!("{} {}.log", trygt_navn(&jobbnavn), chrono_lite().replace(['/', ':', ' '], "-").trim_end_matches('Z'));
         match tokio::fs::OpenOptions::new().create(true).append(true).open(rot0.join(&navn)).await {
-            Ok(f) => { let l = Arc::new(Logg { fil: tokio::sync::Mutex::new(f) }); l.skriv(&format!("Rawskap Transfer - {} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::OS)).await; l.skriv(&format!("Jobb: {} | {} filer | mål: {}", jobbnavn, filer.len(), maal)).await; l.skriv("").await; Some(l) }
+            Ok(f) => { let l = Arc::new(Logg { fil: tokio::sync::Mutex::new(f) }); l.skriv(&format!("Rawbyte Transfer - {} ({})", env!("CARGO_PKG_VERSION"), std::env::consts::OS)).await; l.skriv(&format!("Jobb: {} | {} filer | mål: {}", jobbnavn, filer.len(), maal)).await; l.skriv("").await; Some(l) }
             Err(_) => None,
         }
     } else { None };
@@ -642,7 +642,7 @@ async fn slett_filer(portal: String, nokkel: String, ids: Vec<String>) -> Result
 fn sett_tray_tekst(app: tauri::AppHandle, tekst: String) {
     if let Some(t) = app.tray_by_id("hoved") {
         let kort: String = tekst.chars().take(120).collect();
-        let _ = t.set_tooltip(Some(if kort.is_empty() { "Rawskap Transfer".into() } else { format!("Rawskap Transfer — {kort}") }));
+        let _ = t.set_tooltip(Some(if kort.is_empty() { "Rawbyte Transfer".into() } else { format!("Rawbyte Transfer — {kort}") }));
     }
 }
 
@@ -772,7 +772,7 @@ async fn sjekk_versjon() -> Result<String, String> {
     let r = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build().map_err(|e| format!("{e}"))?
-        .get("https://rawskap.no/api/transfer/versjon")
+        .get("https://rawbyte.no/api/transfer/versjon")
         .send().await.map_err(nettfeil)?;
     r.text().await.map_err(nettfeil)
 }
@@ -1403,17 +1403,26 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| { vis_vindu(app); }))
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec!["--skjult"])))
+        .plugin({
+            // ⚠ Navnet her er NØKKELEN autostarten lagres under (Run-verdien på Windows, LaunchAgent-fila
+            // på Mac) — ikke noe brukeren ser. Uten det bruker pluginen produktnavnet, og da ville byttet til
+            // «Rawbyte Transfer» (14/11) latt den gamle oppføringen stå igjen: bryteren viste «av», appen
+            // startet likevel, og den kunne ikke slås av. Derfor står det gamle navnet. Ikke endre det.
+            let b = tauri_plugin_autostart::Builder::new().app_name("Rawskap Transfer").arg("--skjult");
+            #[cfg(target_os = "macos")]
+            let b = b.macos_launcher(tauri_plugin_autostart::MacosLauncher::LaunchAgent);
+            b.build()
+        })
         .setup(|app| {
-            log::info!("Rawskap Transfer {} startet ({})", env!("CARGO_PKG_VERSION"), std::env::consts::OS);
-            // rawskap:// — i dev er ikke skjemaet registrert av en installer; gjør det her.
+            log::info!("Rawbyte Transfer {} startet ({})", env!("CARGO_PKG_VERSION"), std::env::consts::OS);
+            // rawskap:// og rawbyte:// — i dev er ikke skjemaene registrert av en installer; gjør det her.
             #[cfg(any(windows, target_os = "linux"))]
             { use tauri_plugin_deep_link::DeepLinkExt; let _ = app.deep_link().register_all(); }
             // Systemkurv: venstreklikk = vis, meny = Åpne / Avslutt.
-            let apne = MenuItem::with_id(app, "apne", "Åpne Rawskap Transfer", true, None::<&str>)?;
+            let apne = MenuItem::with_id(app, "apne", "Åpne Rawbyte Transfer", true, None::<&str>)?;
             let avslutt = MenuItem::with_id(app, "avslutt", "Avslutt", true, None::<&str>)?;
             let meny = Menu::with_items(app, &[&apne, &avslutt])?;
-            let mut tb = TrayIconBuilder::with_id("hoved").menu(&meny).show_menu_on_left_click(false).tooltip("Rawskap Transfer");
+            let mut tb = TrayIconBuilder::with_id("hoved").menu(&meny).show_menu_on_left_click(false).tooltip("Rawbyte Transfer");
             if let Some(ikon) = app.default_window_icon().cloned() { tb = tb.icon(ikon); }
             tb.on_menu_event(|app, ev| match ev.id.as_ref() { "apne" => vis_vindu(app), "avslutt" => app.exit(0), _ => {} })
               .on_tray_icon_event(|tray, ev| { if let TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } = ev { vis_vindu(tray.app_handle()); } })
@@ -1451,7 +1460,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![avbryt_fil, les_lokal,
             mangler_lokalt, omdoep, lenk_proxy, lenk_proxy_mappe, del_mappe, send_deling, hash_filer, opplasting_okt, last_inn, hent_liste, hent_deling, deling_passord, sok, last_ned, last_opp, les_mappe, ny_mappe, er_mappe, ledig_plass, vis_i_utforsker, sjekk_versjon, sett_tray_tekst, sett_framdrift, hold_vaaken, har_lokk, aapne_lokk_innstilling, rydd_part_i_mappe, slett_filer, sett_nettverk, synk_sett, synk_merk, sett_til_kurv, avbryt, kobling_start, kobling_poll, maskinnavn, forkast_opplasting, apne_loggmappe, lightroom_status, installer_lightroom])
         .run(tauri::generate_context!())
-        .expect("Rawskap Transfer kunne ikke starte");
+        .expect("Rawbyte Transfer kunne ikke starte");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

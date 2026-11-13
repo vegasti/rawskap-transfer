@@ -1,4 +1,4 @@
-// GRENSESNITT-RIGG for Rawskap Transfer.
+// GRENSESNITT-RIGG for Rawbyte Transfer.
 //
 // Appen er Tauri, men frontend-en er ren HTML/JS i én fil — så den kan kjøres i headless Chrome med
 // en stubb for window.__TAURI__. Da kan oppførsel MÅLES (rektangler, klasser, tekst) i stedet for å
@@ -135,6 +135,8 @@ window.__TAURI__ = (() => {
     console.log('0. Oppstartsskjerm og tooltips');
     // ⚠ Blir oppstartsskjermen staaende, skjuler den HELE appen — den maa vekk naar appen er klar.
     sjekk('oppstartsskjermen er fjernet etter oppstart', await ev(`!document.getElementById('oppstart')`), true);
+    // Rawskap heter Rawbyte (14/11): riggen starter med en kobling lagret mot rawskap.no — den skal vaere flyttet.
+    sjekk('en kobling lagret mot rawskap.no er flyttet til rawbyte.no', await ev(`[document.getElementById('portal').value, window.__butikk.get('kobling').portal]`), ['https://rawbyte.no', 'https://rawbyte.no']);
     // data-t-tt gjelder BARE naar spraaket er engelsk (se `if (!erNo)`), saa title= maa staa paa
     // norsk i HTML-en. Et tomt title ga ingen tooltip i det hele tatt — det var feilen 18/9.
     sjekk('«Følg mappa» har tooltip', await ev(`(document.getElementById('folg-mappe').title || '').length > 40`), true);
@@ -388,7 +390,7 @@ window.__TAURI__ = (() => {
       },
       en: {
         enhet: ['Timed out — try again', 'Could not give the copy the name /Volumes/Arkiv/DSC0001.ARW: the name is taken', 'Part 3 of 9 failed (Storage returned 503) — try again, it resumes from part 3', '“RAW00001.ARW” already exists'],
-        avvist: ['Could not connect — check your network connection', 'Rawskap returned 503'],
+        avvist: ['Could not connect — check your network connection', 'Rawbyte returned 503'],
         laast: 'The share was not opened because it is locked.',
         jobb: { status: 'feil', feil: ['The key is invalid — create a new one', 'Incomplete: 10 of 20 bytes — try again (resumes where it left off)'] },
         fram: ['✕ Storage returned 503', '✕ Cancelled'], fram2: ['✕ The share requires a password', '✕ Noe helt annet gikk galt'], avbruttOrd: 'cancelled',
@@ -547,7 +549,7 @@ window.__TAURI__ = (() => {
       sjekk('med opplasting hit: «send når ferdig» vises og står på', [s2.ventSynlig, s2.ventPaa], [true, true]);
       sjekk('ingenting sendes før jobben er ferdig', s2.forSlutt, []);
       sjekk('linja sier at den venter', /sendes når opplastingen er ferdig/.test(s2.tekstFor), true);
-      sjekk('når jobben er ferdig, bes portalen sende når økta lukkes', s2.etter, [{ portal: 'https://rawskap.no', nokkel: 'x', id: 'recDel1', naarFerdig: true }]);
+      sjekk('når jobben er ferdig, bes portalen sende når økta lukkes', s2.etter, [{ portal: 'https://rawbyte.no', nokkel: 'x', id: 'recDel1', naarFerdig: true }]);
       sjekk('og det skjer FØR økta lukkes', s2.sendIndeks >= 0 && s2.oktFerdig > s2.sendIndeks, true);
     }
 
